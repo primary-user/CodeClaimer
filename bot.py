@@ -176,10 +176,10 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
 async def bulkshare(interaction: discord.Interaction, batch_data: str):
     await interaction.response.defer(ephemeral=True)
     
-    if contains_link(batch_data):
+   if contains_link(batch_data):
         await interaction.followup.send(
             "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
-            re-ephemeral=True
+            ephemeral=True
         )
         return
 

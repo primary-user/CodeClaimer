@@ -72,10 +72,13 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 1. Create a highly structured, succinct embed card for the DM (Displays platform details)
+            # 🟢 YOU MUST ADD THIS EXACT LINE HERE OR IT WILL CRASH:
+            display_platform = f" ({platform_to_send})" if platform_to_send and platform_to_send != "Multi-Platform Group" and platform_to_send != "" else ""
+
+            # Create a highly structured, succinct embed card for the DM 
             dm_embed = discord.Embed(
                 title="🎁 Code Successfully Claimed!",
-                description=f"Here is your activation key for **{item_to_send}** ({platform_to_send}):",
+                description=f"Here is your activation key for **{item_to_send}**{display_platform}:",
                 color=discord.Color.green()
             )
             dm_embed.add_field(name="Product Code", value=f"`{code_to_send}`", inline=False)
@@ -219,7 +222,7 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
         view = ClaimButtonView(product_code=product_code, item_name=item_name, platform="Multi-Platform Group")
         msg = await interaction.channel.send(embed=embed, view=view)
         
-        cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)", (msg.id, product_code, item_name, "Multi-Platform Group"))
+        cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)", (msg.id, product_code, item_name, ""))
         await asyncio.sleep(0.6)
 
     conn.commit()

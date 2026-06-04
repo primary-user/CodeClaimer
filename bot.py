@@ -58,7 +58,7 @@ class ClaimButtonView(discord.ui.View):
                 f"ℹ️ **Have spare keys lying around?** Help keep the cycle going! "
                 f"Use the `/sharecode` command in your server to share your extra codes with the community!\n\n"
                 f"☕ **Enjoying CodeClaimer?** This bot is completely free and hosted out-of-pocket. "
-                f"If you'd like to help keep the servers running 24/7, consider Buying Me a Coffee? https://buymeacoffee.com/doodledave"
+                f"If you'd like to help keep the servers running 24/7, consider Buying Me a Coffee (<https://buymeacoffee.com/doodledave>)!"
             )
             
             # 2. Confirm the claim to the user privately in the server channel

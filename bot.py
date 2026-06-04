@@ -131,38 +131,6 @@ def contains_link(text: str) -> bool:
     url_pattern = re.compile(r'(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)')
     return bool(url_pattern.search(text))
 
-# Slash command for users to securely upload a code
-@bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
-@app_commands.describe(item_name="Name of the game or product", code="Secret activation code")
-async def sharecode(interaction: discord.Interaction, item_name: str, code: str):
-    # Defer to bypass potential 3-second network lag timeout limits
-    await interaction.response.defer(ephemeral=True)
-    
-    if contains_link(code) or contains_link(item_name):
-        await interaction.followup.send(
-            "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
-            ephemeral=True
-        )
-        return
-
-    # Acknowledge privately so the text code never leaks into public server chat files
-    await interaction.followup.send(f"Thank you! Your code has been posted publicly.", ephemeral=True)
-    
-    embed = discord.Embed(
-        title="🎁 Free Code Available!",
-        description=f"**Product:** {item_name}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
-        color=discord.Color.gold()
-    )
-    view = ClaimButtonView(product_code=code, item_name=item_name)
-    msg = await interaction.channel.send(embed=embed, view=view)
-    
-    # Catalog relation index points inside database 
-    conn = sqlite3.connect("codes.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name) VALUES (?, ?, ?)", (msg.id, code, item_name))
-    conn.commit()
-    conn.close()
-
 # Slash command for users to securely upload a code with an explicit platform choice
 @bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
 @app_commands.describe(
@@ -189,7 +157,7 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
     # 🎲 Pick a random title phrase
     random_title = random.choice(TITLE_PHRASES)
 
-    # Built the public notice embed displaying both the product name and the target platform
+    # Build the public notice embed displaying both the product name and the target platform
     embed = discord.Embed(
         title=random_title,
         description=f"**Product:** {item_name}\n**Platform:** {platform}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",

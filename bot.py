@@ -56,7 +56,6 @@ class ClaimButtonView(discord.ui.View):
         cursor.execute("SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?", (msg_id,))
         result = cursor.fetchone()
         
-        # 🟢 FIXED: Clean tuple variable unpacking to prevent internal data crashes
         if result:
             code_to_send = result[0]
             item_to_send = result[1]
@@ -72,7 +71,7 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 🟢 YOU MUST ADD THIS EXACT LINE HERE OR IT WILL CRASH:
+            # 1. Define the display text variable for the DM embed context
             display_platform = f" ({platform_to_send})" if platform_to_send and platform_to_send != "Multi-Platform Group" and platform_to_send != "" else ""
 
             # Create a highly structured, succinct embed card for the DM 
@@ -82,7 +81,6 @@ class ClaimButtonView(discord.ui.View):
                 color=discord.Color.green()
             )
             dm_embed.add_field(name="Product Code", value=f"`{code_to_send}`", inline=False)
-            
             dm_embed.add_field(
                 name="Keep the cycle going!", 
                 value="Have extra keys? Use `/sharecode` to pay it forward!", 
@@ -90,20 +88,38 @@ class ClaimButtonView(discord.ui.View):
             )
             dm_embed.add_field(
                 name="Support CodeClaimer", 
-                value="[Buy Me a Coffee](<https://buymeacoffee.com/doodledave>)", 
+                value="[Buy Me a Coffee](<https://buymeacoffee.com>)", 
                 inline=False
             )
 
-            # Send the clean embed to the user's DM
+            # Send the clean embed to the user's DM safely first
             await interaction.user.send(embed=dm_embed)
             
             # 2. Confirm the claim to the user privately in the server channel
             await interaction.response.send_message(f"Success! The code has been sent to your DMs.", ephemeral=True)
             
-            # 3. Clean up database entry and permanently delete the public post
+            # 🔄 3. FIXED: Create a new public embed that replaces the old code availability notice card
+            public_embed = interaction.message.embeds[0]  # Grab the original embed card reference
+            sharer_mention = "Someone"
+            
+            # Extract the original sharer's mention string out of the old public card layout description field
+            for line in public_embed.description.split("\n"):
+                if "Shared by:" in line:
+                    sharer_mention = line.replace("**Shared by:**", "").strip()
+                    break
+
+            claimed_embed = discord.Embed(
+                title="Loot Claimed!",
+                description=f"The code for **{item_to_send}** has been successfully claimed by {interaction.user.mention}!\n\nThank you to {sharer_mention} for sharing with the community!",
+                color=discord.Color.dark_grey()  # Greys out the card visually to show it's dead
+            )
+
+            # Edit the original public channel message to apply the new grey text card and REMOVE the green claim button
+            await interaction.message.edit(embed=claimed_embed, view=None)
+
+            # Clean up the database entry so it can't be registered again
             cursor.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
-            await interaction.message.delete()
             
         except discord.Forbidden:
             await interaction.response.send_message("Failed to send code. Please open your Privacy Settings / DMs and try again!", ephemeral=True)

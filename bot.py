@@ -52,11 +52,13 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 1. Send the code, the item name, and a friendly community loop reminder via DM
+            # 1. Send the code, the community reminder, and your clean hyperlink via DM
             await interaction.user.send(
                 f"Here is your claimed code for **{item_to_send}**: `{code_to_send}`\n\n"
                 f"ℹ️ **Have spare keys lying around?** Help keep the cycle going! "
-                f"Use the `/sharecode` command in your server to share your extra codes with the community! 🎁"
+                f"Use the `/sharecode` command in your server to share your extra codes with the community!\n\n"
+                f"☕ **Enjoying CodeClaimer?** This bot is completely free and hosted out-of-pocket. "
+                f"If you'd like to help keep the servers running 24/7, consider Buying Me a Coffee? (https://buymeacoffee.com/doodledave)!"
             )
             
             # 2. Confirm the claim to the user privately in the server channel
@@ -66,7 +68,7 @@ class ClaimButtonView(discord.ui.View):
             cursor.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
             await interaction.message.delete()
-            
+           
         except discord.Forbidden:
             # Safeguard: If their DMs are locked, don't drop the database record or delete the post
             await interaction.response.send_message("Failed to send code. Please open your Privacy Settings / DMs and try again!", ephemeral=True)

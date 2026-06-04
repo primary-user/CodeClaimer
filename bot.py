@@ -9,6 +9,20 @@ import re  # Used for anti-phishing link filtering
 # ⚠️ PLACE YOUR SECURE BOT TOKEN HERE
 BOT_TOKEN = "MTUxMTc1ODA4NDE5NDgzMjQ5NQ.GG0VN0.PZRmBoB_g7YJy3pg1Qwo7I5nd_LxHFoCOPnmD8"
 
+# 🎲 List of 10 randomized title phrases (No emojis)
+TITLE_PHRASES = [
+    "Free Code Available!",
+    "Loot Drop Alert!",
+    "A New Key Arrives!",
+    "Claim This Code!",
+    "Fresh Drop in the Channel!",
+    "Spare Code Detected!",
+    "Grab It While It's Hot!",
+    "Community Gift Available!",
+    "First Come First Served!",
+    "New Code Up For Grabs!"
+]
+
 # Initialize local database structure for persistence
 def init_db():
     conn = sqlite3.connect("codes.db")
@@ -149,13 +163,52 @@ async def sharecode(interaction: discord.Interaction, item_name: str, code: str)
     conn.commit()
     conn.close()
 
-# 🚀 UPDATED BULK BATCH PARSER COMMAND (Splits by commas, semicolons, or newlines)
-@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Separate item pairs with a comma or semicolon.")
+# Slash command for users to securely upload a code with an explicit platform choice
+@bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
 @app_commands.describe(
-    batch_data="Format: Game 1 | Code1, Game 2 | Code2, Game 3 | Code3"
+    item_name="Name of the game or product", 
+    platform="The platform this code is for (e.g., Steam, Epic, PS5, Xbox)",
+    code="Secret activation code"
 )
+async def sharecode(interaction: discord.Interaction, item_name: str, platform: str, code: str):
+    # Defer to bypass potential 3-second network lag timeout limits
+    await interaction.response.defer(ephemeral=True)
+    
+    # 🔒 ANTI-PHISHING SECURITY FILTER
+    # Check all three input text fields to ensure no URLs slip into the channel notifications
+    if contains_link(code) or contains_link(item_name) or contains_link(platform):
+        await interaction.followup.send(
+            "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
+            ephemeral=True
+        )
+        return
+
+    # Acknowledge privately so the text code never leaks into public server chat files
+    await interaction.followup.send(f"Thank you! Your code has been posted publicly.", ephemeral=True)
+    
+    # 🎲 Pick a random title phrase
+    random_title = random.choice(TITLE_PHRASES)
+
+    # Built the public notice embed displaying both the product name and the target platform
+    embed = discord.Embed(
+        title=random_title,
+        description=f"**Product:** {item_name}\n**Platform:** {platform}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
+        color=discord.Color.gold()
+    )
+    view = ClaimButtonView(product_code=code, item_name=item_name)
+    msg = await interaction.channel.send(embed=embed, view=view)
+    
+    # Catalog relation index points inside database 
+    conn = sqlite3.connect("codes.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name) VALUES (?, ?, ?)", (msg.id, code, item_name))
+    conn.commit()
+    conn.close()
+    
+# BULK BATCH PARSER COMMAND
+@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Product Name | Code (One per line)")
+@app_commands.describe(batch_data="Paste your items here. Format each line like: Minecraft | ABCD-1234")
 async def bulkshare(interaction: discord.Interaction, batch_data: str):
-    # Defer immediately to allow processing overhead for multi-embed creation loops
     await interaction.response.defer(ephemeral=True)
     
     if contains_link(batch_data):
@@ -165,21 +218,15 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
         )
         return
 
-    # Clean and split the input text by commas, semicolons, OR newlines
-    # This ensures your single-line comma input formats work perfectly!
     items = re.split(r'[\n,;]+', batch_data)
     valid_entries = []
 
-    # Parse each split element based on standard delimiters (| or :) or spaced dash ( - )
     for item in items:
         if not item.strip():
             continue
-        
         parts = re.split(r'[|:]', item, maxsplit=1)
-        
         if len(parts) < 2 and " - " in item:
             parts = item.split(" - ", 1)
-            
         if len(parts) == 2:
             item_name = parts[0].strip()
             product_code = parts[1].strip()
@@ -193,16 +240,17 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
         )
         return
 
-    # Inform the user privately that deployment processing has started
     await interaction.followup.send(f"Processing and deploying **{len(valid_entries)}** distinct claim entries...", ephemeral=True)
 
     conn = sqlite3.connect("codes.db")
     cursor = conn.cursor()
 
-    # Loop through each individual parsed element to build unique embed cards
     for item_name, product_code in valid_entries:
+        # 🎲 Pick a dynamic random phrase for each embed card in the batch
+        random_title = random.choice(TITLE_PHRASES)
+
         embed = discord.Embed(
-            title="🎁 Free Code Available!",
+            title=random_title,
             description=f"**Product:** {item_name}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
             color=discord.Color.gold()
         )
@@ -210,8 +258,6 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
         msg = await interaction.channel.send(embed=embed, view=view)
         
         cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name) VALUES (?, ?, ?)", (msg.id, product_code, item_name))
-        
-        # Tiny delay to ensure server messaging rate-limit compliance
         await asyncio.sleep(0.6)
 
     conn.commit()

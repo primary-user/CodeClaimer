@@ -52,14 +52,29 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 1. Send the code, the item name, a friendly community loop reminder, and a clean link without preview expansions via DM
-            await interaction.user.send(
-                f"Here is your claimed code for **{item_to_send}**: `{code_to_send}`\n\n"
-                f"ℹ️ **Have spare keys lying around?** Help keep the cycle going! "
-                f"Use the `/sharecode` command in your server to share your extra codes with the community! 🎁\n\n"
-                f"☕ **Enjoying CodeClaimer?** This bot is completely free and hosted out-of-pocket. "
-                f"If you'd like to help keep the servers running 24/7, consider Buying Me a Coffee (<https://buymeacoffee.com/doodledave>)!"
+            # 1. Create a highly structured, succinct embed card for the DM
+            dm_embed = discord.Embed(
+                title="🎁 Code Successfully Claimed!",
+                description=f"Here is your activation key for **{item_to_send}**:",
+                color=discord.Color.green()
             )
+            # This puts the code in a prominent box
+            dm_embed.add_field(name="Product Code", value=f"`{code_to_send}`", inline=False)
+            
+            # This condenses the support/sharing reminders into short, tidy footnotes
+            dm_embed.add_field(
+                name="Keep the cycle going!", 
+                value="Have extra keys? Use `/sharecode` to pay it forward!", 
+                inline=False
+            )
+            dm_embed.add_field(
+                name="Support CodeClaimer", 
+                value="[Buy Me a Coffee](<https://buymeacoffee.com/doodledave>)", 
+                inline=False
+            )
+
+            # Send the clean embed to the user's DM
+            await interaction.user.send(embed=dm_embed)
             
             # 2. Confirm the claim to the user privately in the server channel
             await interaction.response.send_message(f"Success! The code has been sent to your DMs.", ephemeral=True)

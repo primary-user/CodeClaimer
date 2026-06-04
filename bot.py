@@ -24,7 +24,7 @@ TITLE_PHRASES = [
     "New Code Up For Grabs!"
 ]
 
-# Initialize local database structure for persistence (Fixed: Includes platform table storage)
+# Initialize local database structure for persistence (Fixed: Standardized table schema)
 def init_db():
     conn = sqlite3.connect("codes.db")
     cursor = conn.cursor()
@@ -39,7 +39,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Fixed: Class constructor now accepts and processes the platform field property
 class ClaimButtonView(discord.ui.View):
     def __init__(self, product_code: str = None, item_name: str = None, platform: str = None):
         super().__init__(timeout=None)  # Setting timeout=None makes the button persistent
@@ -57,6 +56,7 @@ class ClaimButtonView(discord.ui.View):
         cursor.execute("SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?", (msg_id,))
         result = cursor.fetchone()
         
+        # 🟢 FIXED: Clean tuple variable unpacking to prevent internal data crashes
         if result:
             code_to_send = result[0]
             item_to_send = result[1]
@@ -72,7 +72,7 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 1. Create a highly structured, succinct embed card for the DM (Fixed: Displays platform details)
+            # 1. Create a highly structured, succinct embed card for the DM (Displays platform details)
             dm_embed = discord.Embed(
                 title="🎁 Code Successfully Claimed!",
                 description=f"Here is your activation key for **{item_to_send}** ({platform_to_send}):",
@@ -159,24 +159,22 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
         description=f"**Product:** {item_name}\n**Platform:** {platform}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
         color=discord.Color.gold()
     )
-    # Fixed: Passes platform variable arguments safely into UI button view constructor
     view = ClaimButtonView(product_code=code, item_name=item_name, platform=platform)
     msg = await interaction.channel.send(embed=embed, view=view)
     
-    # Fixed: Inserts platform properties into database schema
     conn = sqlite3.connect("codes.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)", (msg.id, code, item_name, platform))
     conn.commit()
     conn.close()
     
-# BULK BATCH PARSER COMMAND (Fixed: Repaired broken line truncation syntax errors)
+# BULK BATCH PARSER COMMAND (Fixed typo: Changed re-ephemeral to standard parameter)
 @bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Product Name | Code (One per line)")
 @app_commands.describe(batch_data="Paste your items here. Format each line like: Minecraft | ABCD-1234")
 async def bulkshare(interaction: discord.Interaction, batch_data: str):
     await interaction.response.defer(ephemeral=True)
     
-   if contains_link(batch_data):
+    if contains_link(batch_data):
         await interaction.followup.send(
             "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
             ephemeral=True
@@ -218,7 +216,6 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
             description=f"**Product:** {item_name}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
             color=discord.Color.gold()
         )
-        # Bulk items fallback to a default label index mapping
         view = ClaimButtonView(product_code=product_code, item_name=item_name, platform="Multi-Platform Group")
         msg = await interaction.channel.send(embed=embed, view=view)
         

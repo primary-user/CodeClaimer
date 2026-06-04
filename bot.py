@@ -26,7 +26,7 @@ TITLE_PHRASES = [
 
 # Initialize local database structure for persistence (Fixed: Standardized table schema)
 def init_db():
-    conn = sqlite3.connect("codes.db")
+    conn = sqlite3.connect("data/codes.db")
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shared_codes (
@@ -51,7 +51,7 @@ class ClaimButtonView(discord.ui.View):
         msg_id = interaction.message.id
         
         # Pull code data from SQLite if it's an old message resurrected after a reboot
-        conn = sqlite3.connect("codes.db")
+        conn = sqlite3.connect("data/codes.db")
         cursor = conn.cursor()
         cursor.execute("SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?", (msg_id,))
         result = cursor.fetchone()
@@ -133,6 +133,7 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
+        # 🟢 CRUCIAL STEP: Keep persistent view active across server updates
         self.add_view(ClaimButtonView()) 
 
 bot = CodeBot()
@@ -181,7 +182,7 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
     view = ClaimButtonView(product_code=code, item_name=item_name, platform=platform)
     msg = await interaction.channel.send(embed=embed, view=view)
     
-    conn = sqlite3.connect("codes.db")
+    conn = sqlite3.connect("data/codes.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)", (msg.id, code, item_name, platform))
     conn.commit()
@@ -224,7 +225,7 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
 
     await interaction.followup.send(f"Processing and deploying **{len(valid_entries)}** distinct claim entries...", ephemeral=True)
 
-    conn = sqlite3.connect("codes.db")
+    conn = sqlite3.connect("data/codes.db")
     cursor = conn.cursor()
 
     for item_name, product_code in valid_entries:

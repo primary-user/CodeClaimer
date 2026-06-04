@@ -134,10 +134,10 @@ async def sharecode(interaction: discord.Interaction, item_name: str, code: str)
     conn.commit()
     conn.close()
 
-# 🚀 BULK BATCH PARSER COMMAND (Generates an individual embed card per item)
-@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Product Name | Code (One per line)")
+# 🚀 UPDATED BULK BATCH PARSER COMMAND (Splits by commas, semicolons, or newlines)
+@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Separate item pairs with a comma or semicolon.")
 @app_commands.describe(
-    batch_data="Paste your items here. Format each line like: Minecraft | ABCD-1234"
+    batch_data="Format: Game 1 | Code1, Game 2 | Code2, Game 3 | Code3"
 )
 async def bulkshare(interaction: discord.Interaction, batch_data: str):
     # Defer immediately to allow processing overhead for multi-embed creation loops
@@ -150,19 +150,20 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
         )
         return
 
-    # Split the input text into a clean list of lines
-    lines = batch_data.strip().split("\n")
+    # Clean and split the input text by commas, semicolons, OR newlines
+    # This ensures your single-line comma input formats work perfectly!
+    items = re.split(r'[\n,;]+', batch_data)
     valid_entries = []
 
-    # Parse lines based on standard delimiters (| or :) or spaced dash ( - )
-    for line in lines:
-        if not line.strip():
+    # Parse each split element based on standard delimiters (| or :) or spaced dash ( - )
+    for item in items:
+        if not item.strip():
             continue
         
-        parts = re.split(r'[|:]', line, maxsplit=1)
+        parts = re.split(r'[|:]', item, maxsplit=1)
         
-        if len(parts) < 2 and " - " in line:
-            parts = line.split(" - ", 1)
+        if len(parts) < 2 and " - " in item:
+            parts = item.split(" - ", 1)
             
         if len(parts) == 2:
             item_name = parts[0].strip()
@@ -172,7 +173,7 @@ async def bulkshare(interaction: discord.Interaction, batch_data: str):
 
     if not valid_entries:
         await interaction.followup.send(
-            "❌ **Format Error:** Could not parse any valid entries. Please format each line exactly like: `Game Name | Code-Here`", 
+            "❌ **Format Error:** Could not parse any valid entries. Please format your list like: `Game 1 | Code1, Game 2 | Code2`", 
             ephemeral=True
         )
         return

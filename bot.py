@@ -172,8 +172,8 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
     conn.close()
     
 # BULK BATCH PARSER COMMAND (Fixed typo: Changed re-ephemeral to standard parameter)
-@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Game 1 | Code1, Game 2 | Code2")
-@app_commands.describe(batch_data="Paste your items here. Format each line like: Game 1 | Code1, Game 2 | Code2")
+@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Game 1 (Platform) | Code1, Game 2 (Platform) | Code2")
+@app_commands.describe(batch_data="Paste your items here. Format each line like: Game 1 (Platform) | Code1, Game 2 (Platform) | Code2")
 async def bulkshare(interaction: discord.Interaction, batch_data: str):
     await interaction.response.defer(ephemeral=True)
     

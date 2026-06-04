@@ -52,11 +52,11 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            # 1. Send the code, the community reminder, and your clean hyperlink via DM
+            # 1. Send the code, the item name, a friendly community loop reminder, and a clean link without preview expansions via DM
             await interaction.user.send(
                 f"Here is your claimed code for **{item_to_send}**: `{code_to_send}`\n\n"
                 f"ℹ️ **Have spare keys lying around?** Help keep the cycle going! "
-                f"Use the `/sharecode` command in your server to share your extra codes with the community!\n\n"
+                f"Use the `/sharecode` command in your server to share your extra codes with the community! 🎁\n\n"
                 f"☕ **Enjoying CodeClaimer?** This bot is completely free and hosted out-of-pocket. "
                 f"If you'd like to help keep the servers running 24/7, consider Buying Me a Coffee (<https://buymeacoffee.com/doodledave>)!"
             )
@@ -68,7 +68,7 @@ class ClaimButtonView(discord.ui.View):
             cursor.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
             await interaction.message.delete()
-           
+            
         except discord.Forbidden:
             # Safeguard: If their DMs are locked, don't drop the database record or delete the post
             await interaction.response.send_message("Failed to send code. Please open your Privacy Settings / DMs and try again!", ephemeral=True)
@@ -97,27 +97,27 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync application tree: {e}")
 
+# Anti-Phishing Security Check Utility
+def contains_link(text: str) -> bool:
+    url_pattern = re.compile(r'(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)')
+    return bool(url_pattern.search(text))
+
 # Slash command for users to securely upload a code
 @bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
 @app_commands.describe(item_name="Name of the game or product", code="Secret activation code")
 async def sharecode(interaction: discord.Interaction, item_name: str, code: str):
+    # Defer to bypass potential 3-second network lag timeout limits
+    await interaction.response.defer(ephemeral=True)
     
-    # 🔒 ANTI-PHISHING SECURITY FILTER
-    # This regex blocks entries featuring http://, https://, www., or standard URL layouts
-    url_pattern = re.compile(
-        r'(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)'
-    )
-    
-    # Terminate routine immediately if a link footprint matches either input field
-    if url_pattern.search(code) or url_pattern.search(item_name):
-        await interaction.response.send_message(
+    if contains_link(code) or contains_link(item_name):
+        await interaction.followup.send(
             "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
             ephemeral=True
         )
         return
 
     # Acknowledge privately so the text code never leaks into public server chat files
-    await interaction.response.send_message(f"Thank you! Your code has been posted publicly.", ephemeral=True)
+    await interaction.followup.send(f"Thank you! Your code has been posted publicly.", ephemeral=True)
     
     embed = discord.Embed(
         title="🎁 Free Code Available!",
@@ -131,6 +131,73 @@ async def sharecode(interaction: discord.Interaction, item_name: str, code: str)
     conn = sqlite3.connect("codes.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name) VALUES (?, ?, ?)", (msg.id, code, item_name))
+    conn.commit()
+    conn.close()
+
+# 🚀 BULK BATCH PARSER COMMAND (Generates an individual embed card per item)
+@bot.tree.command(name="bulkshare", description="Drop a batch of different items. Format: Product Name | Code (One per line)")
+@app_commands.describe(
+    batch_data="Paste your items here. Format each line like: Minecraft | ABCD-1234"
+)
+async def bulkshare(interaction: discord.Interaction, batch_data: str):
+    # Defer immediately to allow processing overhead for multi-embed creation loops
+    await interaction.response.defer(ephemeral=True)
+    
+    if contains_link(batch_data):
+        await interaction.followup.send(
+            "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.", 
+            ephemeral=True
+        )
+        return
+
+    # Split the input text into a clean list of lines
+    lines = batch_data.strip().split("\n")
+    valid_entries = []
+
+    # Parse lines based on standard delimiters (| or :) or spaced dash ( - )
+    for line in lines:
+        if not line.strip():
+            continue
+        
+        parts = re.split(r'[|:]', line, maxsplit=1)
+        
+        if len(parts) < 2 and " - " in line:
+            parts = line.split(" - ", 1)
+            
+        if len(parts) == 2:
+            item_name = parts[0].strip()
+            product_code = parts[1].strip()
+            if item_name and product_code:
+                valid_entries.append((item_name, product_code))
+
+    if not valid_entries:
+        await interaction.followup.send(
+            "❌ **Format Error:** Could not parse any valid entries. Please format each line exactly like: `Game Name | Code-Here`", 
+            ephemeral=True
+        )
+        return
+
+    # Inform the user privately that deployment processing has started
+    await interaction.followup.send(f"Processing and deploying **{len(valid_entries)}** distinct claim entries...", ephemeral=True)
+
+    conn = sqlite3.connect("codes.db")
+    cursor = conn.cursor()
+
+    # Loop through each individual parsed element to build unique embed cards
+    for item_name, product_code in valid_entries:
+        embed = discord.Embed(
+            title="🎁 Free Code Available!",
+            description=f"**Product:** {item_name}\n**Shared by:** {interaction.user.mention}\n\nClick the button below to claim it instantly via DM.",
+            color=discord.Color.gold()
+        )
+        view = ClaimButtonView(product_code=product_code, item_name=item_name)
+        msg = await interaction.channel.send(embed=embed, view=view)
+        
+        cursor.execute("INSERT INTO shared_codes (message_id, product_code, item_name) VALUES (?, ?, ?)", (msg.id, product_code, item_name))
+        
+        # Tiny delay to ensure server messaging rate-limit compliance
+        await asyncio.sleep(0.6)
+
     conn.commit()
     conn.close()
 

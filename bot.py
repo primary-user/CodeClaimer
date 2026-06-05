@@ -1,14 +1,14 @@
+import os
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiohttp
 import asyncio
 import sqlite3
-import re  # Used for anti-phishing link filtering
-import random  # Used for title randomization
 
-# ⚠️ PLACE YOUR SECURE BOT TOKEN HERE
-BOT_TOKEN = "MTUxMTc1ODA4NDE5NDgzMjQ5NQ.GG0VN0.PZRmBoB_g7YJy3pg1Qwo7I5nd_LxHFoCOPnmD8"
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not BOT_TOKEN:
+    raise RuntimeError("Missing DISCORD_TOKEN environment variable.")
 
 # List of 10 randomized title phrases (No emojis)
 TITLE_PHRASES = [

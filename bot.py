@@ -88,7 +88,7 @@ class ClaimButtonView(discord.ui.View):
             )
             dm_embed.add_field(
                 name="Support CodeClaimer", 
-                value="[Buy Me a Coffee](<https://buymeacoffee.com/doodledave>)", 
+                value="[Ko-Fi](<https://ko-fi.com/artchemylabs>)", 
                 inline=False
             )
 

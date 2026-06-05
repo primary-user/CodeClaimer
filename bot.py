@@ -1,4 +1,6 @@
 import os
+import re
+import random
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -9,6 +11,9 @@ BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable.")
+
+DB_PATH = os.getenv("DB_PATH", "data/codes.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # List of 10 randomized title phrases (No emojis)
 TITLE_PHRASES = [

@@ -1,8 +1,8 @@
 # CodeClaimer
 
-CodeClaimer is a custom Discord bot for small, high-trust communities that want a safe way to share spare product codes, game keys, and digital access codes.
+CodeClaimer is a custom Discord bot for small, high-trust communities that want a safer way to share spare product codes, game keys, and digital access codes.
 
-Instead of posting codes publicly where anyone can copy them, members submit codes through slash commands. CodeClaimer posts a clean public claim card, DMs the hidden code to the first person who claims it, then updates the public post so the community can see the code has already been claimed.
+Instead of posting codes publicly where anyone can copy them, members submit codes through slash commands. CodeClaimer posts a public claim card, keeps the actual code hidden, DMs the code to the first person who claims it, then marks the public post as claimed.
 
 ---
 
@@ -12,17 +12,24 @@ Instead of posting codes publicly where anyone can copy them, members submit cod
 - Hidden product/game/access codes
 - Public claim cards with product, platform, and sharer information
 - First-come, first-served claiming
-- Private DM delivery to the claimer
-- Public post updates after a successful claim
-- Claim button removal after claim
+- Private DM delivery to the first claimer
+- Public claim cards are greyed out after a successful claim
+- Claim button is removed after a successful claim
 - Persistent SQLite database support
 - Railway-ready environment variable setup
 - Anti-phishing link filter
 - `/sharecode` command for single code drops
-- `/bulkshare` command for multiple code drops
-- Bulk platform parsing using `Product Name (Platform) | Code`
+- `/bulkshare` guided panel for multiple code drops
+- Bulk entry modal with a large multi-line text field
+- Bulk parsing using `Product Name (Platform) | Code`
+- Line-break bulk entry support
+- Comma and semicolon fallback parsing
+- `/help` command with ephemeral instructions
+- `/settings` panel
+- Mods Only access toggle
+- Mods Only is ON by default for new servers
+- Support CodeClaimer button linking to Ko-fi
 - Randomized public card titles
-- Ko-fi support link in successful claim DMs
 
 ---
 
@@ -30,7 +37,7 @@ Instead of posting codes publicly where anyone can copy them, members submit cod
 
 1. A member submits a code using `/sharecode` or `/bulkshare`.
 2. The bot checks the submission for links or suspicious web addresses.
-3. The actual code is kept hidden from the public channel.
+3. The actual code stays hidden from the public channel.
 4. The bot posts a public claim card showing:
    - Product
    - Platform
@@ -43,6 +50,63 @@ Instead of posting codes publicly where anyone can copy them, members submit cod
 ---
 
 ## Commands
+
+### `/help`
+
+Shows private instructions for using CodeClaimer.
+
+The help panel explains:
+
+- How to use `/sharecode`
+- How to use `/bulkshare`
+- The correct bulk format
+- The rules for sharing codes
+- Where to find `/settings`
+
+The help response is ephemeral, so only the user who runs the command sees it.
+
+---
+
+### `/settings`
+
+Opens the CodeClaimer settings panel.
+
+The settings panel includes:
+
+- **Mods Only: ON/OFF** toggle
+- **Support CodeClaimer** button
+
+Only moderators can change settings.
+
+Moderator access is based on one of these Discord permissions:
+
+- Administrator
+- Manage Server
+- Manage Messages
+
+#### Mods Only Default
+
+Mods Only is **ON by default** for new servers.
+
+That means regular members cannot use `/sharecode` or `/bulkshare` until a moderator turns Mods Only off in `/settings`.
+
+#### Mods Only: ON
+
+Only moderators can use:
+
+- `/sharecode`
+- `/bulkshare`
+
+#### Mods Only: OFF
+
+Members with lower roles can use:
+
+- `/sharecode`
+- `/bulkshare`
+
+Claiming a code is still available to members who can see and click the claim card.
+
+---
 
 ### `/sharecode`
 
@@ -76,15 +140,26 @@ Click the button below to claim it instantly via DM.
 
 ### `/bulkshare`
 
-Shares multiple hidden codes at once.
+Opens a private guided bulk-sharing panel.
 
-#### Format
+The user flow is:
+
+1. Run `/bulkshare`
+2. Read the private instruction panel
+3. Click **Open Bulk Entry Form**
+4. Paste multiple code entries into the modal
+5. Submit the form
+6. CodeClaimer posts one claim card per valid entry
+
+#### Preferred Format
+
+Use one code per line:
 
 ```text
 Product Name (Platform) | Code
+Product Name (Platform) | Code
+Product Name (Platform) | Code
 ```
-
-You can separate entries by new lines, commas, or semicolons.
 
 #### Example
 
@@ -104,10 +179,39 @@ Shared by: @username
 Click the button below to claim it instantly via DM.
 ```
 
-If no platform is included in parentheses, the bot will use:
+#### Fallback Separators
+
+Line breaks are recommended, but the parser also accepts:
+
+- Commas
+- Semicolons
+
+Example fallback format:
 
 ```text
-Platform: Unknown
+Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456
+```
+
+---
+
+## Bulk Share Panel
+
+The `/bulkshare` command no longer forces the user to paste everything into a slash command field.
+
+Instead, it opens a private instruction card with a button:
+
+```text
+Open Bulk Entry Form
+```
+
+The button opens a Discord modal with a large paragraph field. This allows users to paste multiple lines of text more naturally.
+
+Preferred input:
+
+```text
+Hollow Knight (Steam) | ABC-123
+Celeste (Epic) | DEF-456
+Minecraft Skin Pack (Xbox) | GHI-789
 ```
 
 ---
@@ -129,13 +233,15 @@ Rejected submissions show this message:
 Submission Rejected: Links, websites, and web addresses are strictly prohibited to prevent phishing scams.
 ```
 
+This is not a full moderation or malware detection system. It is a basic safety filter to reduce obvious phishing risk.
+
 ---
 
 ## Database
 
 CodeClaimer uses SQLite for persistence.
 
-The database stores active, unclaimed codes in the `shared_codes` table:
+The database stores active, unclaimed codes in the `shared_codes` table.
 
 | Column | Description |
 |---|---|
@@ -146,11 +252,52 @@ The database stores active, unclaimed codes in the `shared_codes` table:
 
 When a code is successfully claimed, the row is deleted from the database.
 
+CodeClaimer also stores server settings in the `guild_settings` table.
+
+| Column | Description |
+|---|---|
+| `guild_id` | Discord server ID |
+| `mods_only` | `1` means Mods Only is ON, `0` means Mods Only is OFF |
+
+---
+
+## Persistence
+
+CodeClaimer is designed so active claim cards and settings survive bot restarts, Railway redeploys, and new GitHub commits.
+
+Persistence depends on three things:
+
+1. Active code data is saved in SQLite by Discord `message_id`.
+2. The claim button uses a fixed persistent `custom_id`.
+3. The bot re-registers the claim button view on startup using `setup_hook()`.
+
+The persistent claim button uses:
+
+```python
+timeout=None
+```
+
+and a fixed button ID:
+
+```python
+custom_id="codeclaimer_claim_code_btn"
+```
+
+The bot also runs:
+
+```python
+self.add_view(ClaimButtonView())
+```
+
+inside `setup_hook()`.
+
+This is what lets older claim buttons continue working after a restart or redeploy.
+
 ---
 
 ## Railway Environment Variables
 
-CodeClaimer is set up to keep sensitive values out of GitHub.
+CodeClaimer keeps sensitive values out of GitHub.
 
 ### Required Variable
 
@@ -175,6 +322,24 @@ data/codes.db
 ```
 
 For Railway production, use a mounted volume so the SQLite database survives redeploys.
+
+---
+
+## Railway Volume Requirement
+
+If you want claim cards and settings to survive Railway redeploys, you need a Railway volume mounted at:
+
+```text
+/data
+```
+
+Then set:
+
+```env
+DB_PATH=/data/codes.db
+```
+
+Without a mounted volume, Railway may wipe the local SQLite file during redeploys.
 
 ---
 
@@ -250,7 +415,8 @@ Even though most of the bot uses slash commands, this was part of the current se
 - If the token was ever committed to GitHub, reset it in the Discord Developer Portal.
 - Do not share screenshots or pasted code that include the token.
 - Keep this bot intended for small, trusted communities.
-- The anti-phishing filter helps reduce risk, but it is not a full moderation or malware detection system.
+- Mods Only is ON by default for safer server rollout.
+- The anti-phishing filter helps reduce risk, but it is not a complete moderation system.
 
 ---
 
@@ -264,7 +430,8 @@ When a user claims a code, they receive a clean DM embed containing:
 - The platform, when available
 - The hidden product code
 - A reminder to share extra keys using `/sharecode`
-- A Ko-fi support link
+
+The DM no longer includes the Ko-fi support link.
 
 ### Public Claimed Message
 
@@ -282,6 +449,22 @@ The claim button is removed.
 
 ---
 
+## Support Button
+
+The Ko-fi link now lives in the `/settings` panel as a button:
+
+```text
+Support CodeClaimer
+```
+
+It links to:
+
+```text
+https://ko-fi.com/artchemylabs
+```
+
+---
+
 ## Project Status
 
 Current CodeClaimer status:
@@ -289,14 +472,23 @@ Current CodeClaimer status:
 - Bot token moved to Railway environment variable
 - SQLite database added for persistence
 - Railway deployment supported
+- Railway volume support documented
 - Anti-phishing filter added
 - `/sharecode` command added
-- `/bulkshare` command added
-- Bulk platform parsing added
-- Public cards now show product, platform, and sharer
+- `/bulkshare` guided panel added
+- Bulk modal form added
+- Bulk line-break format added
+- Bulk comma and semicolon fallback parsing added
+- `/help` command added
+- `/settings` command added
+- Mods Only toggle added
+- Mods Only is ON by default
+- Public cards show product, platform, and sharer
 - DM layout cleaned up
+- Ko-fi removed from DM card
+- Ko-fi support button added to settings panel
 - Claimed posts are greyed out instead of deleted
-- Ko-fi support link added to DMs
+- Persistent claim buttons survive restarts and redeploys when SQLite is persisted
 
 ---
 
@@ -304,16 +496,16 @@ Current CodeClaimer status:
 
 Possible next features:
 
-- Admin-only cleanup command
+- Admin cleanup command
 - Claim history log channel
 - Optional cooldowns to prevent one user from claiming too many codes
-- Role restrictions for sharing or claiming
-- Better duplicate claim protection under heavy traffic
+- Role restrictions for claiming, not just sharing
 - Platform dropdown choices
 - Anonymous sharing option
 - Public stats command
-- `/help` command
-- Better bulk upload feedback showing skipped or malformed entries
+- Better duplicate claim protection under heavy traffic
+- Better skipped-entry reporting for bulk uploads
+- Exportable claim/share history for moderators
 
 ---
 

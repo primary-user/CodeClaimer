@@ -679,9 +679,8 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         required=True,
         max_length=4000,
         placeholder=(
-            "Hollow Knight (Steam): ABC-123 | 12/31/2026\n"
-            "Celeste: DEF-456\n"
-            "Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026"
+            "Game (Steam): ABC-123 | 12/31/2026\n"
+            "Game 2: DEF-456"
         )
     )
 
@@ -781,7 +780,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
 
 class BulkSharePanelView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=180)
+        super().__init__(timeout=600)
 
     @discord.ui.button(label="Open Bulk Entry Form", style=discord.ButtonStyle.primary, custom_id="codeclaimer_open_bulk_modal")
     async def open_bulk_modal(self, interaction: discord.Interaction, button: discord.ui.Button):

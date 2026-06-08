@@ -511,10 +511,14 @@ Possible next features:
 
 ## License
 
-Private project unless otherwise specified.
+CodeClaimer is open-source under the MIT License.
+
+You can inspect, modify, self-host, and contribute to the project. The official hosted bot is maintained independently and supported through Ko-fi donations.
 
 ---
 
-## Maintainer
+## Support
 
-Built and maintained by the CodeClaimer project owner.
+If CodeClaimer is useful to your server, you can support development and hosting here:
+
+[ko-fi.com/artchemylabs](https://ko-fi.com/artchemylabs)

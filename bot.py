@@ -21,7 +21,6 @@ if db_dir:
     os.makedirs(db_dir, exist_ok=True)
 
 
-# List of 10 randomized title phrases (No emojis)
 TITLE_PHRASES = [
     "Free Code Available!",
     "Loot Drop Alert!",
@@ -36,10 +35,10 @@ TITLE_PHRASES = [
 ]
 
 
-# Initialize database structure for persistence
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shared_codes (
             message_id INTEGER PRIMARY KEY,
@@ -48,13 +47,151 @@ def init_db():
             platform TEXT NOT NULL DEFAULT 'Unknown'
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            mods_only INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
     conn.commit()
     conn.close()
 
 
+def contains_link(text: str) -> bool:
+    url_pattern = re.compile(
+        r"(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)"
+    )
+    return bool(url_pattern.search(text))
+
+
+def parse_bulk_label(label: str):
+    """
+    Parses labels like:
+    Game Name (Steam)
+
+    Returns item_name, platform.
+    """
+    label = label.strip()
+    match = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", label)
+
+    if match:
+        item_name = match.group(1).strip()
+        platform = match.group(2).strip()
+    else:
+        item_name = label
+        platform = "Unknown"
+
+    return item_name, platform
+
+
+def is_moderator(user) -> bool:
+    permissions = getattr(user, "guild_permissions", None)
+
+    if permissions is None:
+        return False
+
+    return (
+        permissions.administrator
+        or permissions.manage_guild
+        or permissions.manage_messages
+    )
+
+
+def get_mods_only(guild_id: int) -> bool:
+    if guild_id is None:
+        return False
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT mods_only FROM guild_settings WHERE guild_id = ?",
+        (guild_id,)
+    )
+    result = cursor.fetchone()
+
+    if result is None:
+        cursor.execute(
+            "INSERT INTO guild_settings (guild_id, mods_only) VALUES (?, 0)",
+            (guild_id,)
+        )
+        conn.commit()
+        conn.close()
+        return False
+
+    conn.close()
+    return bool(result[0])
+
+
+def set_mods_only(guild_id: int, enabled: bool):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO guild_settings (guild_id, mods_only)
+        VALUES (?, ?)
+        ON CONFLICT(guild_id)
+        DO UPDATE SET mods_only = excluded.mods_only
+        """,
+        (guild_id, 1 if enabled else 0)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+async def user_can_use_bot(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None:
+        return True
+
+    mods_only = get_mods_only(interaction.guild.id)
+
+    if not mods_only:
+        return True
+
+    return is_moderator(interaction.user)
+
+
+async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str):
+    random_title = random.choice(TITLE_PHRASES)
+
+    embed = discord.Embed(
+        title=random_title,
+        description=(
+            f"**Product:** {item_name}\n"
+            f"**Platform:** {platform}\n"
+            f"**Shared by:** {sharer.mention}\n\n"
+            "Click the button below to claim it instantly via DM."
+        ),
+        color=discord.Color.gold()
+    )
+
+    view = ClaimButtonView(
+        product_code=product_code,
+        item_name=item_name,
+        platform=platform
+    )
+
+    msg = await channel.send(embed=embed, view=view)
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
+        (msg.id, product_code, item_name, platform)
+    )
+    conn.commit()
+    conn.close()
+
+    return msg
+
+
 class ClaimButtonView(discord.ui.View):
     def __init__(self, product_code: str = None, item_name: str = None, platform: str = None):
-        super().__init__(timeout=None)  # Keeps the button persistent
+        super().__init__(timeout=None)
         self.product_code = product_code
         self.item_name = item_name
         self.platform = platform
@@ -65,8 +202,6 @@ class ClaimButtonView(discord.ui.View):
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-
-        # Pull code data from SQLite if this is an old message after a reboot
         cursor.execute(
             "SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?",
             (msg_id,)
@@ -74,9 +209,7 @@ class ClaimButtonView(discord.ui.View):
         result = cursor.fetchone()
 
         if result:
-            code_to_send = result[0]
-            item_to_send = result[1]
-            platform_to_send = result[2]
+            code_to_send, item_to_send, platform_to_send = result
         else:
             code_to_send = self.product_code
             item_to_send = self.item_name
@@ -108,13 +241,7 @@ class ClaimButtonView(discord.ui.View):
                 value="Have extra keys? Use `/sharecode` to pay it forward!",
                 inline=False
             )
-            dm_embed.add_field(
-                name="Support CodeClaimer",
-                value="[Ko-Fi](<https://ko-fi.com/artchemylabs>)",
-                inline=False
-            )
 
-            # DM safely first. If the DM fails, the public claim message stays available.
             await interaction.user.send(embed=dm_embed)
 
             await interaction.response.send_message(
@@ -141,10 +268,8 @@ class ClaimButtonView(discord.ui.View):
                 color=discord.Color.dark_grey()
             )
 
-            # Grey out the original public card and remove the claim button
             await interaction.message.edit(embed=claimed_embed, view=None)
 
-            # Clean up the database entry so it cannot be claimed again
             cursor.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
 
@@ -157,6 +282,179 @@ class ClaimButtonView(discord.ui.View):
             conn.close()
 
 
+def build_settings_embed(guild_id: int):
+    mods_only = get_mods_only(guild_id)
+
+    access_mode = "Mods Only: ON" if mods_only else "Mods Only: OFF"
+    access_description = (
+        "Only moderators can use `/sharecode` and `/bulkshare`."
+        if mods_only
+        else "Members with lower roles can use `/sharecode` and `/bulkshare`."
+    )
+
+    embed = discord.Embed(
+        title="CodeClaimer Settings",
+        description="Manage how CodeClaimer works in this server.",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(
+        name="Access",
+        value=(
+            f"**{access_mode}**\n"
+            f"{access_description}\n\n"
+            "Moderator access is based on Administrator, Manage Server, or Manage Messages permissions."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Support",
+        value="Use the button below to support CodeClaimer.",
+        inline=False
+    )
+
+    return embed
+
+
+class SettingsView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+
+        mods_only = get_mods_only(guild_id)
+
+        toggle_button = discord.ui.Button(
+            label="Mods Only: ON" if mods_only else "Mods Only: OFF",
+            style=discord.ButtonStyle.danger if mods_only else discord.ButtonStyle.success,
+            custom_id="toggle_mods_only"
+        )
+        toggle_button.callback = self.toggle_mods_only_callback
+        self.add_item(toggle_button)
+
+        self.add_item(
+            discord.ui.Button(
+                label="Support CodeClaimer",
+                style=discord.ButtonStyle.link,
+                url="https://ko-fi.com/artchemylabs"
+            )
+        )
+
+    async def toggle_mods_only_callback(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Settings can only be changed inside a server.",
+                ephemeral=True
+            )
+            return
+
+        if not is_moderator(interaction.user):
+            await interaction.response.send_message(
+                "Only moderators can change CodeClaimer settings.",
+                ephemeral=True
+            )
+            return
+
+        current = get_mods_only(interaction.guild.id)
+        set_mods_only(interaction.guild.id, not current)
+
+        updated_embed = build_settings_embed(interaction.guild.id)
+        updated_view = SettingsView(interaction.guild.id)
+
+        await interaction.response.edit_message(
+            embed=updated_embed,
+            view=updated_view
+        )
+
+
+class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
+    batch_data = discord.ui.TextInput(
+        label="Bulk code list",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=4000,
+        placeholder=(
+            "Use this exact format:\n"
+            "Product Name (Platform) | Code, Product Name (Platform) | Code\n\n"
+            "Example:\n"
+            "Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456"
+        )
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if not await user_can_use_bot(interaction):
+            await interaction.followup.send(
+                "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share this code.",
+                ephemeral=True
+            )
+            return
+
+        raw_text = str(self.batch_data.value)
+
+        if contains_link(raw_text):
+            await interaction.followup.send(
+                "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.",
+                ephemeral=True
+            )
+            return
+
+        items = re.split(r"[\n,;]+", raw_text)
+        valid_entries = []
+
+        for item in items:
+            if not item.strip():
+                continue
+
+            parts = re.split(r"[|:]", item, maxsplit=1)
+
+            if len(parts) < 2 and " - " in item:
+                parts = item.split(" - ", 1)
+
+            if len(parts) == 2:
+                raw_item_label = parts[0].strip()
+                product_code = parts[1].strip()
+
+                item_name, platform = parse_bulk_label(raw_item_label)
+
+                if item_name and product_code:
+                    valid_entries.append((item_name, platform, product_code))
+
+        if not valid_entries:
+            await interaction.followup.send(
+                (
+                    "❌ **Format Error:** Could not parse any valid entries.\n\n"
+                    "Use this format as one block of text, with each code separated by commas:\n"
+                    "`Product Name (Platform) | Code, Product Name (Platform) | Code`\n\n"
+                    "Example:\n"
+                    "`Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456`"
+                ),
+                ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"Processing and deploying **{len(valid_entries)}** distinct claim entries...",
+            ephemeral=True
+        )
+
+        for item_name, platform, product_code in valid_entries:
+            await post_claim_card(
+                channel=interaction.channel,
+                sharer=interaction.user,
+                item_name=item_name,
+                platform=platform,
+                product_code=product_code
+            )
+            await asyncio.sleep(0.6)
+
+        await interaction.followup.send(
+            f"Done. Posted **{len(valid_entries)}** claim entries.",
+            ephemeral=True
+        )
+
+
 class CodeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -164,7 +462,6 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Keeps persistent claim buttons active across restarts
         self.add_view(ClaimButtonView())
 
 
@@ -182,37 +479,83 @@ async def on_ready():
         print(f"Failed to sync application tree: {e}")
 
 
-# Anti-phishing security check utility
-def contains_link(text: str) -> bool:
-    url_pattern = re.compile(
-        r"(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)"
+@bot.tree.command(name="help", description="Show CodeClaimer instructions.")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="CodeClaimer Help",
+        description=(
+            "CodeClaimer lets your community safely share spare product, game, or access codes. "
+            "Codes are hidden publicly and sent by DM to the first person who claims them."
+        ),
+        color=discord.Color.blue()
     )
-    return bool(url_pattern.search(text))
+
+    embed.add_field(
+        name="/sharecode",
+        value=(
+            "Use this to share one code.\n\n"
+            "**Fields:**\n"
+            "`item_name` - Name of the game or product\n"
+            "`platform` - Platform, such as Steam, Epic, PS5, or Xbox\n"
+            "`code` - The private code\n\n"
+            "**Example:**\n"
+            "`/sharecode item_name: Hollow Knight platform: Steam code: ABC-123`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="/bulkshare",
+        value=(
+            "Use this to share multiple codes. The command opens a form where you can paste one block of text.\n\n"
+            "**Required format:**\n"
+            "`Product Name (Platform) | Code, Product Name (Platform) | Code`\n\n"
+            "**Important:**\n"
+            "Keep it as a single string of text. Separate each code entry with a comma.\n\n"
+            "**Example:**\n"
+            "`Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456, Minecraft Skin Pack (Xbox) | GHI-789`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="/settings",
+        value="Opens the settings panel with the Mods Only toggle and support button.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="Rules",
+        value=(
+            "No links, websites, or web addresses are allowed. "
+            "The first person to claim receives the code by DM. "
+            "After claiming, the public post is marked as claimed and the button is removed."
+        ),
+        inline=False
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-def parse_bulk_label(label: str):
-    """
-    Parses bulk item labels like:
-    Game Name (Steam)
+@bot.tree.command(name="settings", description="Open CodeClaimer settings.")
+async def settings_command(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Settings can only be opened inside a server.",
+            ephemeral=True
+        )
+        return
 
-    Returns:
-    item_name, platform
-    """
-    label = label.strip()
+    embed = build_settings_embed(interaction.guild.id)
+    view = SettingsView(interaction.guild.id)
 
-    match = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", label)
-
-    if match:
-        item_name = match.group(1).strip()
-        platform = match.group(2).strip()
-    else:
-        item_name = label
-        platform = "Unknown"
-
-    return item_name, platform
+    await interaction.response.send_message(
+        embed=embed,
+        view=view,
+        ephemeral=True
+    )
 
 
-# Slash command for users to securely upload a single code
 @bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
 @app_commands.describe(
     item_name="Name of the game or product",
@@ -221,6 +564,13 @@ def parse_bulk_label(label: str):
 )
 async def sharecode(interaction: discord.Interaction, item_name: str, platform: str, code: str):
     await interaction.response.defer(ephemeral=True)
+
+    if not await user_can_use_bot(interaction):
+        await interaction.followup.send(
+            "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share this code.",
+            ephemeral=True
+        )
+        return
 
     if contains_link(code) or contains_link(item_name) or contains_link(platform):
         await interaction.followup.send(
@@ -234,120 +584,27 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
         ephemeral=True
     )
 
-    random_title = random.choice(TITLE_PHRASES)
-
-    embed = discord.Embed(
-        title=random_title,
-        description=(
-            f"**Product:** {item_name}\n"
-            f"**Platform:** {platform}\n"
-            f"**Shared by:** {interaction.user.mention}\n\n"
-            f"Click the button below to claim it instantly via DM."
-        ),
-        color=discord.Color.gold()
+    await post_claim_card(
+        channel=interaction.channel,
+        sharer=interaction.user,
+        item_name=item_name,
+        platform=platform,
+        product_code=code
     )
 
-    view = ClaimButtonView(product_code=code, item_name=item_name, platform=platform)
-    msg = await interaction.channel.send(embed=embed, view=view)
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
-        (msg.id, code, item_name, platform)
-    )
-    conn.commit()
-    conn.close()
-
-
-# Bulk batch parser command
-@bot.tree.command(
-    name="bulkshare",
-    description="Drop a batch of different items. Format: Game 1 (Platform) | Code1, Game 2 (Platform) | Code2"
-)
-@app_commands.describe(
-    batch_data="Format each entry like: Game 1 (Steam) | Code1, Game 2 (Epic) | Code2"
-)
-async def bulkshare(interaction: discord.Interaction, batch_data: str):
-    await interaction.response.defer(ephemeral=True)
-
-    if contains_link(batch_data):
-        await interaction.followup.send(
-            "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.",
+@bot.tree.command(name="bulkshare", description="Open a form to share multiple codes at once.")
+async def bulkshare(interaction: discord.Interaction):
+    if not await user_can_use_bot(interaction):
+        await interaction.response.send_message(
+            "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share these codes.",
             ephemeral=True
         )
         return
 
-    items = re.split(r"[\n,;]+", batch_data)
-    valid_entries = []
-
-    for item in items:
-        if not item.strip():
-            continue
-
-        parts = re.split(r"[|:]", item, maxsplit=1)
-
-        if len(parts) < 2 and " - " in item:
-            parts = item.split(" - ", 1)
-
-        if len(parts) == 2:
-            raw_item_label = parts[0].strip()
-            product_code = parts[1].strip()
-
-            item_name, platform = parse_bulk_label(raw_item_label)
-
-            if item_name and product_code:
-                valid_entries.append((item_name, platform, product_code))
-
-    if not valid_entries:
-        await interaction.followup.send(
-            "❌ **Format Error:** Could not parse any valid entries. Please format your list like: `Game 1 (Steam) | Code1, Game 2 (Epic) | Code2`",
-            ephemeral=True
-        )
-        return
-
-    await interaction.followup.send(
-        f"Processing and deploying **{len(valid_entries)}** distinct claim entries...",
-        ephemeral=True
-    )
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    for item_name, platform, product_code in valid_entries:
-        random_title = random.choice(TITLE_PHRASES)
-
-        embed = discord.Embed(
-            title=random_title,
-            description=(
-                f"**Product:** {item_name}\n"
-                f"**Platform:** {platform}\n"
-                f"**Shared by:** {interaction.user.mention}\n\n"
-                f"Click the button below to claim it instantly via DM."
-            ),
-            color=discord.Color.gold()
-        )
-
-        view = ClaimButtonView(
-            product_code=product_code,
-            item_name=item_name,
-            platform=platform
-        )
-
-        msg = await interaction.channel.send(embed=embed, view=view)
-
-        cursor.execute(
-            "INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
-            (msg.id, product_code, item_name, platform)
-        )
-
-        await asyncio.sleep(0.6)
-
-    conn.commit()
-    conn.close()
+    await interaction.response.send_modal(BulkShareModal())
 
 
-# Native Linux production boot loop
 async def main():
     async with bot:
         await bot.start(BOT_TOKEN)

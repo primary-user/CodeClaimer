@@ -684,7 +684,7 @@ async def bulkshare(interaction: discord.Interaction):
             "`Hollow Knight (Steam) | ABC-123`\n"
             "`Celeste (Epic) | DEF-456`\n"
             "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
-            "Line breaks are recommended. Commas and semicolons are accepted as fallbacks."
+            "Must use linebreaks for each new entry."
         ),
         color=discord.Color.blue()
     )

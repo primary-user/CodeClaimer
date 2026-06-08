@@ -35,8 +35,12 @@ TITLE_PHRASES = [
 ]
 
 
+def get_db_connection():
+    return sqlite3.connect(DB_PATH)
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -92,7 +96,6 @@ def split_bulk_entries(raw_text: str):
     Product Name (Platform) | Code
 
     Fallback separators are semicolons and commas.
-    Line breaks are safest because some codes may contain hyphens or other punctuation.
     """
     if "\n" in raw_text:
         return [line.strip() for line in raw_text.splitlines() if line.strip()]
@@ -120,7 +123,7 @@ def get_mods_only(guild_id: int) -> bool:
     if guild_id is None:
         return False
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
@@ -143,7 +146,7 @@ def get_mods_only(guild_id: int) -> bool:
 
 
 def set_mods_only(guild_id: int, enabled: bool):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
@@ -173,6 +176,10 @@ async def user_can_use_bot(interaction: discord.Interaction) -> bool:
 
 
 async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str):
+    """
+    Posts one public claim card and stores the hidden code in the persistent database.
+    This is what allows claim buttons to survive bot resets, Railway redeploys, and GitHub commits.
+    """
     random_title = random.choice(TITLE_PHRASES)
 
     embed = discord.Embed(
@@ -194,10 +201,10 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
 
     msg = await channel.send(embed=embed, view=view)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
         (msg.id, product_code, item_name, platform)
     )
     conn.commit()
@@ -207,18 +214,28 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
 
 
 class ClaimButtonView(discord.ui.View):
+    """
+    Persistent claim button view.
+
+    Requirements for persistence:
+    - timeout=None
+    - every button has a fixed custom_id
+    - bot.add_view(ClaimButtonView()) is called in setup_hook
+    - code data is retrieved from SQLite by message_id after restart
+    """
     def __init__(self, product_code: str = None, item_name: str = None, platform: str = None):
         super().__init__(timeout=None)
         self.product_code = product_code
         self.item_name = item_name
         self.platform = platform
 
-    @discord.ui.button(label="Claim Code 🎁", style=discord.ButtonStyle.green, custom_id="claim_code_btn")
+    @discord.ui.button(label="Claim Code 🎁", style=discord.ButtonStyle.green, custom_id="codeclaimer_claim_code_btn")
     async def claim_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         msg_id = interaction.message.id
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
+
         cursor.execute(
             "SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?",
             (msg_id,)
@@ -259,6 +276,7 @@ class ClaimButtonView(discord.ui.View):
                 inline=False
             )
 
+            # DM first. If the user has DMs closed, the code stays available.
             await interaction.user.send(embed=dm_embed)
 
             await interaction.response.send_message(
@@ -326,6 +344,15 @@ def build_settings_embed(guild_id: int):
     )
 
     embed.add_field(
+        name="Persistence",
+        value=(
+            "Active claim cards and server settings are saved in SQLite. "
+            "For Railway, set `DB_PATH=/data/codes.db` and use a mounted volume so data survives redeploys."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
         name="Support",
         value="Use the button below to support CodeClaimer.",
         inline=False
@@ -344,7 +371,7 @@ class SettingsView(discord.ui.View):
         toggle_button = discord.ui.Button(
             label="Mods Only: ON" if mods_only else "Mods Only: OFF",
             style=discord.ButtonStyle.danger if mods_only else discord.ButtonStyle.success,
-            custom_id="toggle_mods_only"
+            custom_id="codeclaimer_toggle_mods_only"
         )
         toggle_button.callback = self.toggle_mods_only_callback
         self.add_item(toggle_button)
@@ -493,7 +520,7 @@ class BulkSharePanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
 
-    @discord.ui.button(label="Open Bulk Entry Form", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Open Bulk Entry Form", style=discord.ButtonStyle.primary, custom_id="codeclaimer_open_bulk_modal")
     async def open_bulk_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await user_can_use_bot(interaction):
             await interaction.response.send_message(
@@ -512,6 +539,7 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
+        # This line is what re-registers old claim buttons after every restart, Railway redeploy, or GitHub commit.
         self.add_view(ClaimButtonView())
 
 
@@ -522,6 +550,7 @@ bot = CodeBot()
 async def on_ready():
     init_db()
     print(f"Logged in as {bot.user.name}!")
+    print(f"Using SQLite database at: {DB_PATH}")
     try:
         await bot.tree.sync()
         print("Synced application slash commands successfully.")

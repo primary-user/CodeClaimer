@@ -344,15 +344,6 @@ def build_settings_embed(guild_id: int):
     )
 
     embed.add_field(
-        name="Persistence",
-        value=(
-            "Active claim cards and server settings are saved in SQLite. "
-            "For Railway, set `DB_PATH=/data/codes.db` and use a mounted volume so data survives redeploys."
-        ),
-        inline=False
-    )
-
-    embed.add_field(
         name="Support",
         value="Use the button below to support CodeClaimer.",
         inline=False

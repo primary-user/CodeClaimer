@@ -3,6 +3,7 @@ import re
 import random
 import asyncio
 import sqlite3
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -48,9 +49,29 @@ def init_db():
             message_id INTEGER PRIMARY KEY,
             product_code TEXT NOT NULL,
             item_name TEXT NOT NULL,
-            platform TEXT NOT NULL DEFAULT ''
+            platform TEXT NOT NULL DEFAULT '',
+            guild_id INTEGER,
+            channel_id INTEGER,
+            sharer_id INTEGER,
+            created_at TEXT
         )
     """)
+
+    # Migration for existing databases created before these metadata columns existed.
+    cursor.execute("PRAGMA table_info(shared_codes)")
+    shared_code_columns = [column[1] for column in cursor.fetchall()]
+
+    if "guild_id" not in shared_code_columns:
+        cursor.execute("ALTER TABLE shared_codes ADD COLUMN guild_id INTEGER")
+
+    if "channel_id" not in shared_code_columns:
+        cursor.execute("ALTER TABLE shared_codes ADD COLUMN channel_id INTEGER")
+
+    if "sharer_id" not in shared_code_columns:
+        cursor.execute("ALTER TABLE shared_codes ADD COLUMN sharer_id INTEGER")
+
+    if "created_at" not in shared_code_columns:
+        cursor.execute("ALTER TABLE shared_codes ADD COLUMN created_at TEXT")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
@@ -188,6 +209,11 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     random_title = random.choice(TITLE_PHRASES)
     platform = clean_platform(platform)
 
+    guild_id = channel.guild.id if getattr(channel, "guild", None) else None
+    channel_id = channel.id if getattr(channel, "id", None) else None
+    sharer_id = sharer.id if getattr(sharer, "id", None) else None
+    created_at = datetime.now(timezone.utc).isoformat()
+
     embed = discord.Embed(
         title=random_title,
         description=(
@@ -210,8 +236,29 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT OR REPLACE INTO shared_codes (message_id, product_code, item_name, platform) VALUES (?, ?, ?, ?)",
-        (msg.id, product_code, item_name, platform)
+        """
+        INSERT OR REPLACE INTO shared_codes (
+            message_id,
+            product_code,
+            item_name,
+            platform,
+            guild_id,
+            channel_id,
+            sharer_id,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            msg.id,
+            product_code,
+            item_name,
+            platform,
+            guild_id,
+            channel_id,
+            sharer_id,
+            created_at
+        )
     )
     conn.commit()
     conn.close()

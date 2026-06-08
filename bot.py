@@ -55,7 +55,7 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
-            mods_only INTEGER NOT NULL DEFAULT 0
+            mods_only INTEGER NOT NULL DEFAULT 1
         )
     """)
 
@@ -134,12 +134,12 @@ def get_mods_only(guild_id: int) -> bool:
 
     if result is None:
         cursor.execute(
-            "INSERT INTO guild_settings (guild_id, mods_only) VALUES (?, 0)",
+            "INSERT INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
             (guild_id,)
         )
         conn.commit()
         conn.close()
-        return False
+        return True
 
     conn.close()
     return bool(result[0])

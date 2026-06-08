@@ -86,6 +86,23 @@ def parse_bulk_label(label: str):
     return item_name, platform
 
 
+def split_bulk_entries(raw_text: str):
+    """
+    Preferred input is one code per line:
+    Product Name (Platform) | Code
+
+    Fallback separators are semicolons and commas.
+    Line breaks are safest because some codes may contain hyphens or other punctuation.
+    """
+    if "\n" in raw_text:
+        return [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    if ";" in raw_text:
+        return [entry.strip() for entry in raw_text.split(";") if entry.strip()]
+
+    return [entry.strip() for entry in raw_text.split(",") if entry.strip()]
+
+
 def is_moderator(user) -> bool:
     permissions = getattr(user, "guild_permissions", None)
 
@@ -369,15 +386,14 @@ class SettingsView(discord.ui.View):
 
 class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
     batch_data = discord.ui.TextInput(
-        label="Bulk code list",
+        label="Paste codes, one per line",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=4000,
         placeholder=(
-            "Use this exact format:\n"
-            "Product Name (Platform) | Code, Product Name (Platform) | Code\n\n"
-            "Example:\n"
-            "Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456"
+            "Hollow Knight (Steam) | ABC-123\n"
+            "Celeste (Epic) | DEF-456\n"
+            "Minecraft Skin Pack (Xbox) | GHI-789"
         )
     )
 
@@ -386,7 +402,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
 
         if not await user_can_use_bot(interaction):
             await interaction.followup.send(
-                "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share this code.",
+                "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share these codes.",
                 ephemeral=True
             )
             return
@@ -400,13 +416,11 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             )
             return
 
-        items = re.split(r"[\n,;]+", raw_text)
+        items = split_bulk_entries(raw_text)
         valid_entries = []
+        skipped_entries = []
 
         for item in items:
-            if not item.strip():
-                continue
-
             parts = re.split(r"[|:]", item, maxsplit=1)
 
             if len(parts) < 2 and " - " in item:
@@ -420,22 +434,27 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
 
                 if item_name and product_code:
                     valid_entries.append((item_name, platform, product_code))
+                else:
+                    skipped_entries.append(item)
+            else:
+                skipped_entries.append(item)
 
         if not valid_entries:
             await interaction.followup.send(
                 (
                     "❌ **Format Error:** Could not parse any valid entries.\n\n"
-                    "Use this format as one block of text, with each code separated by commas:\n"
-                    "`Product Name (Platform) | Code, Product Name (Platform) | Code`\n\n"
+                    "Use one code per line in this format:\n"
+                    "`Product Name (Platform) | Code`\n\n"
                     "Example:\n"
-                    "`Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456`"
+                    "`Hollow Knight (Steam) | ABC-123`\n"
+                    "`Celeste (Epic) | DEF-456`"
                 ),
                 ephemeral=True
             )
             return
 
         await interaction.followup.send(
-            f"Processing and deploying **{len(valid_entries)}** distinct claim entries...",
+            f"Processing **{len(valid_entries)}** claim entries...",
             ephemeral=True
         )
 
@@ -449,10 +468,41 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             )
             await asyncio.sleep(0.6)
 
-        await interaction.followup.send(
-            f"Done. Posted **{len(valid_entries)}** claim entries.",
-            ephemeral=True
-        )
+        if skipped_entries:
+            skipped_preview = "\n".join(f"- {entry}" for entry in skipped_entries[:5])
+            more_text = ""
+            if len(skipped_entries) > 5:
+                more_text = f"\n...and {len(skipped_entries) - 5} more."
+
+            await interaction.followup.send(
+                (
+                    f"Done. Posted **{len(valid_entries)}** claim entries.\n\n"
+                    f"Skipped **{len(skipped_entries)}** entries because they did not match the required format:\n"
+                    f"{skipped_preview}{more_text}"
+                ),
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Done. Posted **{len(valid_entries)}** claim entries.",
+                ephemeral=True
+            )
+
+
+class BulkSharePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Open Bulk Entry Form", style=discord.ButtonStyle.primary)
+    async def open_bulk_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await user_can_use_bot(interaction):
+            await interaction.response.send_message(
+                "CodeClaimer is currently set to **Mods Only: ON**. Ask a moderator to share these codes.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(BulkShareModal())
 
 
 class CodeBot(commands.Bot):
@@ -507,13 +557,15 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="/bulkshare",
         value=(
-            "Use this to share multiple codes. The command opens a form where you can paste one block of text.\n\n"
-            "**Required format:**\n"
-            "`Product Name (Platform) | Code, Product Name (Platform) | Code`\n\n"
-            "**Important:**\n"
-            "Keep it as a single string of text. Separate each code entry with a comma.\n\n"
+            "Use this to share multiple codes. The command opens a private instruction panel. "
+            "Click **Open Bulk Entry Form**, then paste multiple lines.\n\n"
+            "**Preferred format, one code per line:**\n"
+            "`Product Name (Platform) | Code`\n\n"
             "**Example:**\n"
-            "`Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456, Minecraft Skin Pack (Xbox) | GHI-789`"
+            "`Hollow Knight (Steam) | ABC-123`\n"
+            "`Celeste (Epic) | DEF-456`\n"
+            "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
+            "Commas and semicolons are accepted as fallbacks, but line breaks are recommended."
         ),
         inline=False
     )
@@ -593,7 +645,7 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
     )
 
 
-@bot.tree.command(name="bulkshare", description="Open a form to share multiple codes at once.")
+@bot.tree.command(name="bulkshare", description="Open a guided panel to share multiple codes at once.")
 async def bulkshare(interaction: discord.Interaction):
     if not await user_can_use_bot(interaction):
         await interaction.response.send_message(
@@ -602,7 +654,26 @@ async def bulkshare(interaction: discord.Interaction):
         )
         return
 
-    await interaction.response.send_modal(BulkShareModal())
+    embed = discord.Embed(
+        title="Bulk Share Codes",
+        description=(
+            "Paste multiple codes into a private form. Each code should be on its own line.\n\n"
+            "**Required format:**\n"
+            "`Product Name (Platform) | Code`\n\n"
+            "**Example:**\n"
+            "`Hollow Knight (Steam) | ABC-123`\n"
+            "`Celeste (Epic) | DEF-456`\n"
+            "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
+            "Line breaks are recommended. Commas and semicolons are accepted as fallbacks."
+        ),
+        color=discord.Color.blue()
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=BulkSharePanelView(),
+        ephemeral=True
+    )
 
 
 async def main():

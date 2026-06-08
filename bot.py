@@ -48,7 +48,7 @@ def init_db():
             message_id INTEGER PRIMARY KEY,
             product_code TEXT NOT NULL,
             item_name TEXT NOT NULL,
-            platform TEXT NOT NULL DEFAULT 'Unknown'
+            platform TEXT NOT NULL DEFAULT ''
         )
     """)
 
@@ -70,33 +70,42 @@ def contains_link(text: str) -> bool:
     return bool(url_pattern.search(text))
 
 
-def parse_bulk_label(label: str):
-    """
-    Parses labels like:
-    Game Name (Steam)
+def clean_platform(platform: str | None) -> str:
+    if platform is None:
+        return ""
 
-    Returns item_name, platform.
-    """
+    platform = str(platform).strip()
+
+    if platform.lower() in ["unknown", "n/a", "na", "none", "no platform"]:
+        return ""
+
+    return platform
+
+
+def format_platform_line(platform: str | None) -> str:
+    platform = clean_platform(platform)
+
+    if not platform:
+        return ""
+
+    return f"**Platform:** {platform}\n"
+
+
+def parse_bulk_label(label: str):
     label = label.strip()
     match = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", label)
 
     if match:
         item_name = match.group(1).strip()
-        platform = match.group(2).strip()
+        platform = clean_platform(match.group(2))
     else:
         item_name = label
-        platform = "Unknown"
+        platform = ""
 
     return item_name, platform
 
 
 def split_bulk_entries(raw_text: str):
-    """
-    Preferred input is one code per line:
-    Product Name (Platform) | Code
-
-    Fallback separators are semicolons and commas.
-    """
     if "\n" in raw_text:
         return [line.strip() for line in raw_text.splitlines() if line.strip()]
 
@@ -176,17 +185,14 @@ async def user_can_use_bot(interaction: discord.Interaction) -> bool:
 
 
 async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str):
-    """
-    Posts one public claim card and stores the hidden code in the persistent database.
-    This is what allows claim buttons to survive bot resets, Railway redeploys, and GitHub commits.
-    """
     random_title = random.choice(TITLE_PHRASES)
+    platform = clean_platform(platform)
 
     embed = discord.Embed(
         title=random_title,
         description=(
             f"**Product:** {item_name}\n"
-            f"**Platform:** {platform}\n"
+            f"{format_platform_line(platform)}"
             f"**Shared by:** {sharer.mention}\n\n"
             "Click the button below to claim it instantly via DM."
         ),
@@ -214,20 +220,11 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
 
 
 class ClaimButtonView(discord.ui.View):
-    """
-    Persistent claim button view.
-
-    Requirements for persistence:
-    - timeout=None
-    - every button has a fixed custom_id
-    - bot.add_view(ClaimButtonView()) is called in setup_hook
-    - code data is retrieved from SQLite by message_id after restart
-    """
     def __init__(self, product_code: str = None, item_name: str = None, platform: str = None):
         super().__init__(timeout=None)
         self.product_code = product_code
         self.item_name = item_name
-        self.platform = platform
+        self.platform = clean_platform(platform)
 
     @discord.ui.button(label="Claim Code 🎁", style=discord.ButtonStyle.green, custom_id="codeclaimer_claim_code_btn")
     async def claim_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -244,10 +241,11 @@ class ClaimButtonView(discord.ui.View):
 
         if result:
             code_to_send, item_to_send, platform_to_send = result
+            platform_to_send = clean_platform(platform_to_send)
         else:
             code_to_send = self.product_code
             item_to_send = self.item_name
-            platform_to_send = self.platform if self.platform else "Unknown"
+            platform_to_send = clean_platform(self.platform)
 
         if not code_to_send:
             await interaction.response.send_message(
@@ -258,11 +256,7 @@ class ClaimButtonView(discord.ui.View):
             return
 
         try:
-            display_platform = (
-                f" ({platform_to_send})"
-                if platform_to_send and platform_to_send not in ["Multi-Platform Group", ""]
-                else ""
-            )
+            display_platform = f" ({platform_to_send})" if platform_to_send else ""
 
             dm_embed = discord.Embed(
                 title="🎁 Code Successfully Claimed!",
@@ -276,7 +270,6 @@ class ClaimButtonView(discord.ui.View):
                 inline=False
             )
 
-            # DM first. If the user has DMs closed, the code stays available.
             await interaction.user.send(embed=dm_embed)
 
             await interaction.response.send_message(
@@ -296,7 +289,7 @@ class ClaimButtonView(discord.ui.View):
             claimed_embed = discord.Embed(
                 title="Loot Claimed!",
                 description=(
-                    f"The code for **{item_to_send}** has been successfully claimed by "
+                    f"The code for **{item_to_send}**{display_platform} has been successfully claimed by "
                     f"{interaction.user.mention}!\n\n"
                     f"Thank you to {sharer_mention} for sharing with the community!"
                 ),
@@ -410,7 +403,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         max_length=4000,
         placeholder=(
             "Hollow Knight (Steam) | ABC-123\n"
-            "Celeste (Epic) | DEF-456\n"
+            "Celeste | DEF-456\n"
             "Minecraft Skin Pack (Xbox) | GHI-789"
         )
     )
@@ -463,9 +456,10 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
                     "❌ **Format Error:** Could not parse any valid entries.\n\n"
                     "Use one code per line in this format:\n"
                     "`Product Name (Platform) | Code`\n\n"
-                    "Example:\n"
+                    "Platform is optional. If you do not include one, it will be left off the claim card.\n\n"
+                    "Examples:\n"
                     "`Hollow Knight (Steam) | ABC-123`\n"
-                    "`Celeste (Epic) | DEF-456`"
+                    "`Celeste | DEF-456`"
                 ),
                 ephemeral=True
             )
@@ -530,7 +524,6 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # This line is what re-registers old claim buttons after every restart, Railway redeploy, or GitHub commit.
         self.add_view(ClaimButtonView())
 
 
@@ -566,10 +559,12 @@ async def help_command(interaction: discord.Interaction):
             "Use this to share one code.\n\n"
             "**Fields:**\n"
             "`item_name` - Name of the game or product\n"
-            "`platform` - Platform, such as Steam, Epic, PS5, or Xbox\n"
-            "`code` - The private code\n\n"
-            "**Example:**\n"
-            "`/sharecode item_name: Hollow Knight platform: Steam code: ABC-123`"
+            "`code` - The private code\n"
+            "`platform` - Optional platform, such as Steam, Epic, PS5, or Xbox\n\n"
+            "**Example with platform:**\n"
+            "`/sharecode item_name: Hollow Knight code: ABC-123 platform: Steam`\n\n"
+            "**Example without platform:**\n"
+            "`/sharecode item_name: Celeste code: DEF-456`"
         ),
         inline=False
     )
@@ -581,11 +576,12 @@ async def help_command(interaction: discord.Interaction):
             "Click **Open Bulk Entry Form**, then paste multiple lines.\n\n"
             "**Preferred format, one code per line:**\n"
             "`Product Name (Platform) | Code`\n\n"
-            "**Example:**\n"
+            "**Platform is optional:**\n"
+            "`Product Name | Code`\n\n"
+            "**Examples:**\n"
             "`Hollow Knight (Steam) | ABC-123`\n"
-            "`Celeste (Epic) | DEF-456`\n"
-            "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
-            "Commas and semicolons are accepted as fallbacks, but line breaks are recommended."
+            "`Celeste | DEF-456`\n"
+            "`Minecraft Skin Pack (Xbox) | GHI-789`"
         ),
         inline=False
     )
@@ -631,10 +627,10 @@ async def settings_command(interaction: discord.Interaction):
 @bot.tree.command(name="sharecode", description="Share a spare product code with the community safely.")
 @app_commands.describe(
     item_name="Name of the game or product",
-    platform="The platform this code is for, like Steam, Epic, PS5, or Xbox",
-    code="Secret activation code"
+    code="Secret activation code",
+    platform="Optional platform, like Steam, Epic, PS5, or Xbox"
 )
-async def sharecode(interaction: discord.Interaction, item_name: str, platform: str, code: str):
+async def sharecode(interaction: discord.Interaction, item_name: str, code: str, platform: str = ""):
     await interaction.response.defer(ephemeral=True)
 
     if not await user_can_use_bot(interaction):
@@ -643,6 +639,8 @@ async def sharecode(interaction: discord.Interaction, item_name: str, platform: 
             ephemeral=True
         )
         return
+
+    platform = clean_platform(platform)
 
     if contains_link(code) or contains_link(item_name) or contains_link(platform):
         await interaction.followup.send(
@@ -680,9 +678,10 @@ async def bulkshare(interaction: discord.Interaction):
             "Paste multiple codes into a private form. Each code should be on its own line.\n\n"
             "**Required format:**\n"
             "`Product Name (Platform) | Code`\n\n"
-            "**Example:**\n"
+            "**Platform is optional.** If you leave it out, the platform line will not appear on the claim card.\n\n"
+            "**Examples:**\n"
             "`Hollow Knight (Steam) | ABC-123`\n"
-            "`Celeste (Epic) | DEF-456`\n"
+            "`Celeste | DEF-456`\n"
             "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
             "Must use linebreaks for each new entry."
         ),

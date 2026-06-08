@@ -10,26 +10,29 @@ Instead of posting codes publicly where anyone can copy them, members submit cod
 
 - Secure code sharing through Discord slash commands
 - Hidden product/game/access codes
-- Public claim cards with product, platform, and sharer information
+- Public claim cards with product, optional platform, and sharer information
+- Platform field can be left blank
 - First-come, first-served claiming
 - Private DM delivery to the first claimer
 - Public claim cards are greyed out after a successful claim
 - Claim button is removed after a successful claim
 - Persistent SQLite database support
+- Server metadata stored for future admin/stat commands
 - Railway-ready environment variable setup
 - Anti-phishing link filter
 - `/sharecode` command for single code drops
 - `/bulkshare` guided panel for multiple code drops
 - Bulk entry modal with a large multi-line text field
 - Bulk parsing using `Product Name (Platform) | Code`
+- Bulk parsing also supports `Product Name | Code` when platform is omitted
 - Line-break bulk entry support
-- Comma and semicolon fallback parsing
 - `/help` command with ephemeral instructions
 - `/settings` panel
 - Mods Only access toggle
 - Mods Only is ON by default for new servers
 - Support CodeClaimer button linking to Ko-fi
 - Randomized public card titles
+- Persistent claim buttons across bot restarts and redeploys when SQLite is persisted
 
 ---
 
@@ -40,7 +43,7 @@ Instead of posting codes publicly where anyone can copy them, members submit cod
 3. The actual code stays hidden from the public channel.
 4. The bot posts a public claim card showing:
    - Product
-   - Platform
+   - Platform, if provided
    - Shared by
 5. The first member to click **Claim Code 🎁** receives the code by DM.
 6. The public claim card is replaced with a grey claimed message.
@@ -60,6 +63,7 @@ The help panel explains:
 - How to use `/sharecode`
 - How to use `/bulkshare`
 - The correct bulk format
+- That platform is optional
 - The rules for sharing codes
 - Where to find `/settings`
 
@@ -117,16 +121,22 @@ Shares one hidden code with the community.
 | Field | Description |
 |---|---|
 | `item_name` | Name of the game, product, or item |
-| `platform` | Platform the code is for, such as Steam, Epic, PS5, Xbox |
 | `code` | The private activation/product/access code |
+| `platform` | Optional platform, such as Steam, Epic, PS5, Xbox |
 
-#### Example
+#### Example With Platform
 
 ```text
-/sharecode item_name: Hollow Knight platform: Steam code: ABC-123-XYZ
+/sharecode item_name: Hollow Knight code: ABC-123-XYZ platform: Steam
 ```
 
-#### Public Output
+#### Example Without Platform
+
+```text
+/sharecode item_name: Celeste code: DEF-456-XYZ
+```
+
+#### Public Output With Platform
 
 ```text
 Product: Hollow Knight
@@ -135,6 +145,17 @@ Shared by: @username
 
 Click the button below to claim it instantly via DM.
 ```
+
+#### Public Output Without Platform
+
+```text
+Product: Celeste
+Shared by: @username
+
+Click the button below to claim it instantly via DM.
+```
+
+When platform is left blank, the platform line is omitted completely. The bot does not show `Unknown`.
 
 ---
 
@@ -157,7 +178,7 @@ Use one code per line:
 
 ```text
 Product Name (Platform) | Code
-Product Name (Platform) | Code
+Product Name | Code
 Product Name (Platform) | Code
 ```
 
@@ -165,11 +186,11 @@ Product Name (Platform) | Code
 
 ```text
 Hollow Knight (Steam) | ABC-123
-Celeste (Epic) | DEF-456
+Celeste | DEF-456
 Minecraft Skin Pack (Xbox) | GHI-789
 ```
 
-#### Public Output For Each Entry
+#### Public Output For Entry With Platform
 
 ```text
 Product: Hollow Knight
@@ -179,24 +200,22 @@ Shared by: @username
 Click the button below to claim it instantly via DM.
 ```
 
-#### Fallback Separators
-
-Line breaks are recommended, but the parser also accepts:
-
-- Commas
-- Semicolons
-
-Example fallback format:
+#### Public Output For Entry Without Platform
 
 ```text
-Hollow Knight (Steam) | ABC-123, Celeste (Epic) | DEF-456
+Product: Celeste
+Shared by: @username
+
+Click the button below to claim it instantly via DM.
 ```
+
+When platform is omitted, the platform line is left off the public claim card and the claim DM.
 
 ---
 
 ## Bulk Share Panel
 
-The `/bulkshare` command no longer forces the user to paste everything into a slash command field.
+The `/bulkshare` command does not force the user to paste everything into a slash command field.
 
 Instead, it opens a private instruction card with a button:
 
@@ -210,9 +229,35 @@ Preferred input:
 
 ```text
 Hollow Knight (Steam) | ABC-123
-Celeste (Epic) | DEF-456
+Celeste | DEF-456
 Minecraft Skin Pack (Xbox) | GHI-789
 ```
+
+Each new entry should be on its own line.
+
+---
+
+## Optional Platform Behavior
+
+Platform is optional in both `/sharecode` and `/bulkshare`.
+
+The bot treats these platform values as blank:
+
+```text
+Unknown
+N/A
+NA
+None
+No Platform
+```
+
+If platform is blank or treated as blank, CodeClaimer omits the platform line from:
+
+- The public claim card
+- The DM claim card
+- The public claimed message
+
+This keeps the card cleaner and avoids showing unnecessary placeholder text.
 
 ---
 
@@ -248,7 +293,11 @@ The database stores active, unclaimed codes in the `shared_codes` table.
 | `message_id` | Discord message ID for the public claim card |
 | `product_code` | Hidden code to send by DM |
 | `item_name` | Product/game/item name |
-| `platform` | Platform associated with the code |
+| `platform` | Optional platform associated with the code |
+| `guild_id` | Discord server ID where the claim card was posted |
+| `channel_id` | Discord channel ID where the claim card was posted |
+| `sharer_id` | Discord user ID of the member who shared the code |
+| `created_at` | UTC timestamp for when the claim card was created |
 
 When a code is successfully claimed, the row is deleted from the database.
 
@@ -258,6 +307,40 @@ CodeClaimer also stores server settings in the `guild_settings` table.
 |---|---|
 | `guild_id` | Discord server ID |
 | `mods_only` | `1` means Mods Only is ON, `0` means Mods Only is OFF |
+
+---
+
+## Server Data Separation
+
+CodeClaimer now stores `guild_id`, `channel_id`, and `sharer_id` with every shared code.
+
+This means the database is prepared for future per-server tools like:
+
+- `/listcodes`
+- `/cleanup`
+- `/serverstats`
+- `/repost`
+- Claim history logs
+- Moderator exports
+
+The claim system still uses `message_id` as the primary lookup because Discord message IDs are globally unique. The added server metadata makes future admin and reporting commands cleaner and safer.
+
+---
+
+## Database Migration
+
+CodeClaimer includes automatic migration support for the `shared_codes` table.
+
+If an existing SQLite database was created before these columns existed, the bot adds them automatically on startup:
+
+```text
+guild_id
+channel_id
+sharer_id
+created_at
+```
+
+This lets existing installs update without wiping active data.
 
 ---
 
@@ -358,6 +441,7 @@ The bot also uses Python standard library modules:
 - `random`
 - `asyncio`
 - `sqlite3`
+- `datetime`
 
 ---
 
@@ -445,13 +529,15 @@ The code for Product Name has been successfully claimed by @claimer.
 Thank you to @sharer for sharing with the community!
 ```
 
+If a platform was provided, the product is shown with the platform in parentheses. If no platform was provided, nothing extra is shown.
+
 The claim button is removed.
 
 ---
 
 ## Support Button
 
-The Ko-fi link now lives in the `/settings` panel as a button:
+The Ko-fi link lives in the `/settings` panel as a button:
 
 ```text
 Support CodeClaimer
@@ -478,17 +564,20 @@ Current CodeClaimer status:
 - `/bulkshare` guided panel added
 - Bulk modal form added
 - Bulk line-break format added
-- Bulk comma and semicolon fallback parsing added
 - `/help` command added
 - `/settings` command added
 - Mods Only toggle added
 - Mods Only is ON by default
-- Public cards show product, platform, and sharer
+- Platform is optional
+- Blank platform lines are omitted from cards and DMs
+- Public cards show product, optional platform, and sharer
 - DM layout cleaned up
 - Ko-fi removed from DM card
 - Ko-fi support button added to settings panel
 - Claimed posts are greyed out instead of deleted
 - Persistent claim buttons survive restarts and redeploys when SQLite is persisted
+- Server metadata columns added to `shared_codes`
+- Automatic database migration added for the new metadata columns
 
 ---
 
@@ -506,6 +595,8 @@ Possible next features:
 - Better duplicate claim protection under heavy traffic
 - Better skipped-entry reporting for bulk uploads
 - Exportable claim/share history for moderators
+- Server-specific active code list
+- Repost active code cards after channel cleanup
 
 ---
 

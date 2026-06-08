@@ -3,10 +3,10 @@ import re
 import random
 import asyncio
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 
@@ -50,6 +50,7 @@ def init_db():
             product_code TEXT NOT NULL,
             item_name TEXT NOT NULL,
             platform TEXT NOT NULL DEFAULT '',
+            expires_at TEXT NOT NULL DEFAULT '',
             guild_id INTEGER,
             channel_id INTEGER,
             sharer_id INTEGER,
@@ -57,7 +58,6 @@ def init_db():
         )
     """)
 
-    # Migration for existing databases created before these metadata columns existed.
     cursor.execute("PRAGMA table_info(shared_codes)")
     shared_code_columns = [column[1] for column in cursor.fetchall()]
 
@@ -72,6 +72,9 @@ def init_db():
 
     if "created_at" not in shared_code_columns:
         cursor.execute("ALTER TABLE shared_codes ADD COLUMN created_at TEXT")
+
+    if "expires_at" not in shared_code_columns:
+        cursor.execute("ALTER TABLE shared_codes ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS guild_settings (
@@ -103,6 +106,107 @@ def clean_platform(platform: str | None) -> str:
     return platform
 
 
+def clean_expiration(expires_at: str | None) -> str:
+    """
+    Normalizes optional expiration text.
+    For automatic expiration, use MM/DD/YYYY.
+    YYYY-MM-DD is also accepted for backward compatibility.
+    """
+    if expires_at is None:
+        return ""
+
+    expires_at = str(expires_at).strip()
+
+    if expires_at.lower() in [
+        "unknown",
+        "n/a",
+        "na",
+        "none",
+        "no expiration",
+        "never",
+        "no expiry",
+        "no expire"
+    ]:
+        return ""
+
+    expires_at = re.sub(r"^expires\s+", "", expires_at, flags=re.IGNORECASE).strip()
+    expires_at = re.sub(r"^exp\s+", "", expires_at, flags=re.IGNORECASE).strip()
+
+    return expires_at
+
+
+def parse_expiration_datetime(expires_at: str | None):
+    """
+    Converts supported expiration text into a UTC datetime.
+
+    Preferred:
+    - 12/31/2026
+    - 12/31/2026 23:59
+
+    Backward compatible:
+    - 2026-12-31
+    - 2026-12-31 23:59
+
+    Date-only values expire at the end of that date in UTC.
+    Invalid or blank values return None.
+    """
+    expires_at = clean_expiration(expires_at)
+
+    if not expires_at:
+        return None
+
+    us_match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})(?:[ T](\d{1,2}):(\d{2}))?", expires_at)
+    iso_match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2}))?", expires_at)
+
+    try:
+        if us_match:
+            month = int(us_match.group(1))
+            day = int(us_match.group(2))
+            year = int(us_match.group(3))
+            hour_part = us_match.group(4)
+            minute_part = us_match.group(5)
+
+            if hour_part is not None and minute_part is not None:
+                return datetime(year, month, day, int(hour_part), int(minute_part), tzinfo=timezone.utc)
+
+            return datetime(year, month, day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        if iso_match:
+            year = int(iso_match.group(1))
+            month = int(iso_match.group(2))
+            day = int(iso_match.group(3))
+            hour_part = iso_match.group(4)
+            minute_part = iso_match.group(5)
+
+            if hour_part is not None and minute_part is not None:
+                return datetime(year, month, day, int(hour_part), int(minute_part), tzinfo=timezone.utc)
+
+            return datetime(year, month, day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        return None
+
+    except ValueError:
+        return None
+
+
+def expiration_is_valid(expires_at: str | None) -> bool:
+    expires_at = clean_expiration(expires_at)
+
+    if not expires_at:
+        return True
+
+    return parse_expiration_datetime(expires_at) is not None
+
+
+def is_expired(expires_at: str | None) -> bool:
+    expiration_datetime = parse_expiration_datetime(expires_at)
+
+    if expiration_datetime is None:
+        return False
+
+    return datetime.now(timezone.utc) >= expiration_datetime
+
+
 def format_platform_line(platform: str | None) -> str:
     platform = clean_platform(platform)
 
@@ -110,6 +214,15 @@ def format_platform_line(platform: str | None) -> str:
         return ""
 
     return f"**Platform:** {platform}\n"
+
+
+def format_expiration_line(expires_at: str | None) -> str:
+    expires_at = clean_expiration(expires_at)
+
+    if not expires_at:
+        return ""
+
+    return f"**Expires:** {expires_at}\n"
 
 
 def parse_bulk_label(label: str):
@@ -126,14 +239,54 @@ def parse_bulk_label(label: str):
     return item_name, platform
 
 
+def parse_bulk_entry(entry: str):
+    """
+    Parses:
+    Product Name (Platform): Code | Optional Expiration
+    Product Name: Code
+    """
+    entry = entry.strip()
+
+    if ":" not in entry:
+        return None
+
+    raw_item_label, rest = entry.split(":", 1)
+    raw_item_label = raw_item_label.strip()
+    rest = rest.strip()
+
+    if not raw_item_label or not rest:
+        return None
+
+    if "|" in rest:
+        product_code, expires_at = rest.rsplit("|", 1)
+        product_code = product_code.strip()
+        expires_at = clean_expiration(expires_at)
+    else:
+        product_code = rest.strip()
+        expires_at = ""
+
+    item_name, platform = parse_bulk_label(raw_item_label)
+
+    if not item_name or not product_code:
+        return None
+
+    return item_name, platform, product_code, expires_at
+
+
 def split_bulk_entries(raw_text: str):
+    """
+    Preferred input is one code per line:
+    Product Name (Platform): Code | MM/DD/YYYY
+
+    Semicolons are accepted as a fallback separator.
+    """
     if "\n" in raw_text:
         return [line.strip() for line in raw_text.splitlines() if line.strip()]
 
     if ";" in raw_text:
         return [entry.strip() for entry in raw_text.split(";") if entry.strip()]
 
-    return [entry.strip() for entry in raw_text.split(",") if entry.strip()]
+    return [raw_text.strip()] if raw_text.strip() else []
 
 
 def is_moderator(user) -> bool:
@@ -205,9 +358,10 @@ async def user_can_use_bot(interaction: discord.Interaction) -> bool:
     return is_moderator(interaction.user)
 
 
-async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str):
+async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str, expires_at: str = ""):
     random_title = random.choice(TITLE_PHRASES)
     platform = clean_platform(platform)
+    expires_at = clean_expiration(expires_at)
 
     guild_id = channel.guild.id if getattr(channel, "guild", None) else None
     channel_id = channel.id if getattr(channel, "id", None) else None
@@ -219,6 +373,7 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
         description=(
             f"**Product:** {item_name}\n"
             f"{format_platform_line(platform)}"
+            f"{format_expiration_line(expires_at)}"
             f"**Shared by:** {sharer.mention}\n\n"
             "Click the button below to claim it instantly via DM."
         ),
@@ -228,7 +383,8 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     view = ClaimButtonView(
         product_code=product_code,
         item_name=item_name,
-        platform=platform
+        platform=platform,
+        expires_at=expires_at
     )
 
     msg = await channel.send(embed=embed, view=view)
@@ -242,18 +398,20 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
             product_code,
             item_name,
             platform,
+            expires_at,
             guild_id,
             channel_id,
             sharer_id,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             msg.id,
             product_code,
             item_name,
             platform,
+            expires_at,
             guild_id,
             channel_id,
             sharer_id,
@@ -266,12 +424,53 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     return msg
 
 
+async def mark_code_expired(message_id: int, item_name: str, platform: str, expires_at: str, channel_id: int | None):
+    channel = bot.get_channel(channel_id) if channel_id else None
+
+    if channel is None and channel_id:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            channel = None
+
+    display_platform = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
+
+    expired_embed = discord.Embed(
+        title="Code Expired",
+        description=(
+            f"The code for **{item_name}**{display_platform} was not claimed before it expired.\n\n"
+            f"**Expired:** {clean_expiration(expires_at)}"
+        ),
+        color=discord.Color.dark_grey()
+    )
+
+    if channel:
+        try:
+            msg = await channel.fetch_message(message_id)
+            await msg.edit(embed=expired_embed, view=None)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM shared_codes WHERE message_id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+
 class ClaimButtonView(discord.ui.View):
-    def __init__(self, product_code: str = None, item_name: str = None, platform: str = None):
+    def __init__(
+        self,
+        product_code: str = None,
+        item_name: str = None,
+        platform: str = None,
+        expires_at: str = None
+    ):
         super().__init__(timeout=None)
         self.product_code = product_code
         self.item_name = item_name
         self.platform = clean_platform(platform)
+        self.expires_at = clean_expiration(expires_at)
 
     @discord.ui.button(label="Claim Code 🎁", style=discord.ButtonStyle.green, custom_id="codeclaimer_claim_code_btn")
     async def claim_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -281,18 +480,21 @@ class ClaimButtonView(discord.ui.View):
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT product_code, item_name, platform FROM shared_codes WHERE message_id = ?",
+            "SELECT product_code, item_name, platform, expires_at, channel_id FROM shared_codes WHERE message_id = ?",
             (msg_id,)
         )
         result = cursor.fetchone()
 
         if result:
-            code_to_send, item_to_send, platform_to_send = result
+            code_to_send, item_to_send, platform_to_send, expires_to_send, channel_id = result
             platform_to_send = clean_platform(platform_to_send)
+            expires_to_send = clean_expiration(expires_to_send)
         else:
             code_to_send = self.product_code
             item_to_send = self.item_name
             platform_to_send = clean_platform(self.platform)
+            expires_to_send = clean_expiration(self.expires_at)
+            channel_id = interaction.channel.id if interaction.channel else None
 
         if not code_to_send:
             await interaction.response.send_message(
@@ -300,6 +502,21 @@ class ClaimButtonView(discord.ui.View):
                 ephemeral=True
             )
             conn.close()
+            return
+
+        if is_expired(expires_to_send):
+            conn.close()
+            await mark_code_expired(
+                message_id=msg_id,
+                item_name=item_to_send,
+                platform=platform_to_send,
+                expires_at=expires_to_send,
+                channel_id=channel_id
+            )
+            await interaction.response.send_message(
+                "This code was unclaimed and has expired.",
+                ephemeral=True
+            )
             return
 
         try:
@@ -311,6 +528,10 @@ class ClaimButtonView(discord.ui.View):
                 color=discord.Color.green()
             )
             dm_embed.add_field(name="Product Code", value=f"`{code_to_send}`", inline=False)
+
+            if expires_to_send:
+                dm_embed.add_field(name="Expires", value=expires_to_send, inline=False)
+
             dm_embed.add_field(
                 name="Keep the cycle going!",
                 value="Have extra keys? Use `/sharecode` to pay it forward!",
@@ -384,6 +605,15 @@ def build_settings_embed(guild_id: int):
     )
 
     embed.add_field(
+        name="Expiration",
+        value=(
+            "Use `MM/DD/YYYY` for expiration dates. "
+            "If a code expires before it is claimed, the claim card is updated to show that it was unclaimed and expired."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
         name="Support",
         value="Use the button below to support CodeClaimer.",
         inline=False
@@ -449,9 +679,9 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         required=True,
         max_length=4000,
         placeholder=(
-            "Hollow Knight (Steam) | ABC-123\n"
-            "Celeste | DEF-456\n"
-            "Minecraft Skin Pack (Xbox) | GHI-789"
+            "Hollow Knight (Steam): ABC-123 | 12/31/2026\n"
+            "Celeste: DEF-456\n"
+            "Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026"
         )
     )
 
@@ -479,34 +709,34 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         skipped_entries = []
 
         for item in items:
-            parts = re.split(r"[|:]", item, maxsplit=1)
+            parsed = parse_bulk_entry(item)
 
-            if len(parts) < 2 and " - " in item:
-                parts = item.split(" - ", 1)
-
-            if len(parts) == 2:
-                raw_item_label = parts[0].strip()
-                product_code = parts[1].strip()
-
-                item_name, platform = parse_bulk_label(raw_item_label)
-
-                if item_name and product_code:
-                    valid_entries.append((item_name, platform, product_code))
-                else:
-                    skipped_entries.append(item)
-            else:
+            if parsed is None:
                 skipped_entries.append(item)
+                continue
+
+            item_name, platform, product_code, expires_at = parsed
+
+            if expires_at and not expiration_is_valid(expires_at):
+                skipped_entries.append(f"{item}  [Invalid expiration. Use MM/DD/YYYY.]")
+                continue
+
+            if is_expired(expires_at):
+                skipped_entries.append(f"{item}  [Already expired.]")
+                continue
+
+            valid_entries.append((item_name, platform, product_code, expires_at))
 
         if not valid_entries:
             await interaction.followup.send(
                 (
                     "❌ **Format Error:** Could not parse any valid entries.\n\n"
                     "Use one code per line in this format:\n"
-                    "`Product Name (Platform) | Code`\n\n"
-                    "Platform is optional. If you do not include one, it will be left off the claim card.\n\n"
+                    "`Product Name (Platform): Code | Optional Expiration`\n\n"
+                    "Platform and expiration are optional. Use `MM/DD/YYYY` for expiration.\n\n"
                     "Examples:\n"
-                    "`Hollow Knight (Steam) | ABC-123`\n"
-                    "`Celeste | DEF-456`"
+                    "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
+                    "`Celeste: DEF-456`"
                 ),
                 ephemeral=True
             )
@@ -517,13 +747,14 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             ephemeral=True
         )
 
-        for item_name, platform, product_code in valid_entries:
+        for item_name, platform, product_code, expires_at in valid_entries:
             await post_claim_card(
                 channel=interaction.channel,
                 sharer=interaction.user,
                 item_name=item_name,
                 platform=platform,
-                product_code=product_code
+                product_code=product_code,
+                expires_at=expires_at
             )
             await asyncio.sleep(0.6)
 
@@ -577,11 +808,48 @@ class CodeBot(commands.Bot):
 bot = CodeBot()
 
 
+@tasks.loop(minutes=10)
+async def expire_unclaimed_codes():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT message_id, item_name, platform, expires_at, channel_id
+        FROM shared_codes
+        WHERE expires_at IS NOT NULL AND expires_at != ''
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    for message_id, item_name, platform, expires_at, channel_id in rows:
+        if is_expired(expires_at):
+            await mark_code_expired(
+                message_id=message_id,
+                item_name=item_name,
+                platform=platform,
+                expires_at=expires_at,
+                channel_id=channel_id
+            )
+            await asyncio.sleep(0.4)
+
+
+@expire_unclaimed_codes.before_loop
+async def before_expire_unclaimed_codes():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     init_db()
     print(f"Logged in as {bot.user.name}!")
     print(f"Using SQLite database at: {DB_PATH}")
+
+    if not expire_unclaimed_codes.is_running():
+        expire_unclaimed_codes.start()
+        print("Started expiration checker.")
+
     try:
         await bot.tree.sync()
         print("Synced application slash commands successfully.")
@@ -607,10 +875,11 @@ async def help_command(interaction: discord.Interaction):
             "**Fields:**\n"
             "`item_name` - Name of the game or product\n"
             "`code` - The private code\n"
-            "`platform` - Optional platform, such as Steam, Epic, PS5, or Xbox\n\n"
-            "**Example with platform:**\n"
-            "`/sharecode item_name: Hollow Knight code: ABC-123 platform: Steam`\n\n"
-            "**Example without platform:**\n"
+            "`platform` - Optional platform, such as Steam, Epic, PS5, or Xbox\n"
+            "`expires_at` - Optional expiration date, such as 12/31/2026\n\n"
+            "**Example with expiration:**\n"
+            "`/sharecode item_name: Hollow Knight code: ABC-123 platform: Steam expires_at: 12/31/2026`\n\n"
+            "**Example without expiration:**\n"
             "`/sharecode item_name: Celeste code: DEF-456`"
         ),
         inline=False
@@ -622,13 +891,14 @@ async def help_command(interaction: discord.Interaction):
             "Use this to share multiple codes. The command opens a private instruction panel. "
             "Click **Open Bulk Entry Form**, then paste multiple lines.\n\n"
             "**Preferred format, one code per line:**\n"
-            "`Product Name (Platform) | Code`\n\n"
-            "**Platform is optional:**\n"
-            "`Product Name | Code`\n\n"
+            "`Product Name (Platform): Code | Optional Expiration`\n\n"
+            "**Platform and expiration are optional:**\n"
+            "`Product Name: Code`\n\n"
             "**Examples:**\n"
-            "`Hollow Knight (Steam) | ABC-123`\n"
-            "`Celeste | DEF-456`\n"
-            "`Minecraft Skin Pack (Xbox) | GHI-789`"
+            "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
+            "`Celeste: DEF-456`\n"
+            "`Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026`\n\n"
+            "Expired unclaimed codes are automatically marked as expired."
         ),
         inline=False
     )
@@ -675,9 +945,16 @@ async def settings_command(interaction: discord.Interaction):
 @app_commands.describe(
     item_name="Name of the game or product",
     code="Secret activation code",
-    platform="Optional platform, like Steam, Epic, PS5, or Xbox"
+    platform="Optional platform, like Steam, Epic, PS5, or Xbox",
+    expires_at="Optional expiration date, like 12/31/2026"
 )
-async def sharecode(interaction: discord.Interaction, item_name: str, code: str, platform: str = ""):
+async def sharecode(
+    interaction: discord.Interaction,
+    item_name: str,
+    code: str,
+    platform: str = "",
+    expires_at: str = ""
+):
     await interaction.response.defer(ephemeral=True)
 
     if not await user_can_use_bot(interaction):
@@ -688,10 +965,25 @@ async def sharecode(interaction: discord.Interaction, item_name: str, code: str,
         return
 
     platform = clean_platform(platform)
+    expires_at = clean_expiration(expires_at)
 
-    if contains_link(code) or contains_link(item_name) or contains_link(platform):
+    if expires_at and not expiration_is_valid(expires_at):
+        await interaction.followup.send(
+            "❌ **Expiration Error:** Please use `MM/DD/YYYY` for expiration, such as `12/31/2026`.",
+            ephemeral=True
+        )
+        return
+
+    if contains_link(code) or contains_link(item_name) or contains_link(platform) or contains_link(expires_at):
         await interaction.followup.send(
             "❌ **Submission Rejected:** Links, websites, and web addresses are strictly prohibited to prevent phishing scams.",
+            ephemeral=True
+        )
+        return
+
+    if is_expired(expires_at):
+        await interaction.followup.send(
+            "❌ **Expiration Error:** That expiration date has already passed.",
             ephemeral=True
         )
         return
@@ -706,7 +998,8 @@ async def sharecode(interaction: discord.Interaction, item_name: str, code: str,
         sharer=interaction.user,
         item_name=item_name,
         platform=platform,
-        product_code=code
+        product_code=code,
+        expires_at=expires_at
     )
 
 
@@ -724,13 +1017,14 @@ async def bulkshare(interaction: discord.Interaction):
         description=(
             "Paste multiple codes into a private form. Each code should be on its own line.\n\n"
             "**Required format:**\n"
-            "`Product Name (Platform) | Code`\n\n"
-            "**Platform is optional.** If you leave it out, the platform line will not appear on the claim card.\n\n"
+            "`Product Name (Platform): Code | Optional Expiration`\n\n"
+            "**Platform and expiration are optional.** If you leave them out, those lines will not appear on the claim card.\n\n"
+            "**Expiration format:** `MM/DD/YYYY`\n\n"
             "**Examples:**\n"
-            "`Hollow Knight (Steam) | ABC-123`\n"
-            "`Celeste | DEF-456`\n"
-            "`Minecraft Skin Pack (Xbox) | GHI-789`\n\n"
-            "Must use linebreaks for each new entry."
+            "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
+            "`Celeste: DEF-456`\n"
+            "`Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026`\n\n"
+            "Must use linebreaks for each new entry. Expired unclaimed codes are automatically marked as expired."
         ),
         color=discord.Color.blue()
     )

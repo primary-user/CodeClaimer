@@ -1,76 +1,121 @@
 # CodeClaimer
 
-CodeClaimer is a custom Discord bot for small, trusted Discord communities that want a safer way to share spare product codes, game keys, and digital access codes.
+CodeClaimer is a Discord bot for small, trusted communities that want a safer way to share spare game keys, product codes, access codes, and digital rewards.
 
-Instead of posting codes directly in public chat, members submit them through slash commands. CodeClaimer posts a clean public claim card, keeps the actual code hidden, DMs the code to the first person who claims it, then marks the public post as claimed.
+Instead of posting codes directly in public chat, members submit them through slash commands. CodeClaimer posts a public claim card, keeps the actual code hidden, sends the code by DM to the first person who claims it, then marks the public post as claimed.
 
 ---
 
 ## Features
 
-- Secure hidden code sharing through slash commands
-- Public claim cards with product, optional platform, and sharer information
+- Hidden code sharing through Discord slash commands
+- `/sharecode` for single code drops
+- `/bulkshare` guided panel with a multi-line modal form
+- Optional platform field
+- Optional expiration date field
+- Expired unclaimed cards are automatically marked as expired
 - First-come, first-served claiming
 - Private DM delivery to the first claimer
 - Claimed cards are greyed out and the claim button is removed
 - Persistent SQLite database support
-- Persistent claim buttons across bot restarts and redeploys
+- Persistent claim buttons across restarts and redeploys
 - Server metadata stored for future admin/stat commands
-- Railway-ready environment variable setup
 - Anti-phishing link filter
-- `/sharecode` for single code drops
-- `/bulkshare` guided panel with a multi-line modal form
 - `/help` with private instructions
-- `/settings` panel with Mods Only toggle and Ko-fi support button
+- `/settings` with Mods Only toggle and Ko-fi support button
 - Mods Only is ON by default for new servers
-- Optional platform field
-- Randomized public card titles
-
----
-
-## How It Works
-
-1. A member submits a code using `/sharecode` or `/bulkshare`.
-2. CodeClaimer checks the submission for links or suspicious web addresses.
-3. The actual code stays hidden from the public channel.
-4. The bot posts a public claim card showing the product, optional platform, and sharer.
-5. The first member to click **Claim Code 🎁** receives the code by DM.
-6. The public claim card is marked as claimed.
-7. The claim button is removed.
-8. The claimed code is deleted from SQLite.
+- Railway-ready environment variable setup
 
 ---
 
 ## Commands
 
+### `/sharecode`
+
+Shares one hidden code.
+
+| Field | Required | Description |
+|---|---:|---|
+| `item_name` | Yes | Game, product, or item name |
+| `code` | Yes | Private activation/product/access code |
+| `platform` | No | Platform such as Steam, Epic, PS5, Xbox |
+| `expires_at` | No | Expiration date in `MM/DD/YYYY` format |
+
+Example with platform and expiration:
+
+```text
+/sharecode item_name: Hollow Knight code: ABC-123 platform: Steam expires_at: 12/31/2026
+```
+
+Example without platform or expiration:
+
+```text
+/sharecode item_name: Celeste code: DEF-456
+```
+
+If platform is blank, the platform line is omitted from the public card and DM. The bot does not show `Unknown`.
+
+---
+
+### `/bulkshare`
+
+Opens a private guided panel. The user clicks **Open Bulk Entry Form**, then pastes multiple entries into a Discord modal.
+
+Use one code per line.
+
+Format:
+
+```text
+Product Name (Platform): Code | Optional Expiration
+Product Name: Code
+```
+
+Examples:
+
+```text
+Hollow Knight (Steam): ABC-123 | 12/31/2026
+Celeste: DEF-456
+Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026
+```
+
+Notes:
+
+- `:` separates the product label from the code.
+- `|` is only used before the optional expiration date.
+- Platform is optional.
+- Expiration is optional.
+- Expiration should use `MM/DD/YYYY`.
+- Each valid line creates its own claim card.
+
+---
+
 ### `/help`
 
-Shows private instructions for using CodeClaimer.
+Shows private usage instructions for:
 
-The help panel explains:
+- `/sharecode`
+- `/bulkshare`
+- Optional platform
+- Optional expiration
+- `/settings`
+- Sharing rules
 
-- How to use `/sharecode`
-- How to use `/bulkshare`
-- That platform is optional
-- The sharing rules
-- Where to find `/settings`
-
-The help response is ephemeral, so only the user who runs the command sees it.
+The response is ephemeral.
 
 ---
 
 ### `/settings`
 
-Opens the CodeClaimer settings panel.
+Opens the server settings panel.
 
-The settings panel includes:
+Includes:
 
 - **Mods Only: ON/OFF** toggle
 - **Support CodeClaimer** button
 
 Only moderators can change settings.
 
-Moderator access is based on one of these Discord permissions:
+Moderator access is based on any of these Discord permissions:
 
 - Administrator
 - Manage Server
@@ -78,52 +123,39 @@ Moderator access is based on one of these Discord permissions:
 
 Mods Only is **ON by default** for new servers.
 
-When Mods Only is ON, only moderators can use:
-
-- `/sharecode`
-- `/bulkshare`
-
-When Mods Only is OFF, members with lower roles can use those commands too.
-
-Claiming a visible code is still available to members who can see and click the claim card.
+When Mods Only is ON, only moderators can use `/sharecode` and `/bulkshare`. Claiming visible codes remains available to members who can see and click the claim card.
 
 ---
 
-### `/sharecode`
+## Claim Flow
 
-Shares one hidden code with the community.
+1. A user shares a code with `/sharecode` or `/bulkshare`.
+2. CodeClaimer checks the submission for links or web addresses.
+3. The actual code is stored privately in SQLite.
+4. A public claim card is posted.
+5. The first user to click **Claim Code 🎁** receives the code by DM.
+6. The public card is marked as claimed.
+7. The button is removed.
+8. The code row is deleted from SQLite.
 
-#### Fields
+If a code expires before being claimed, the card updates to show that it was unclaimed and expired, the button is removed, and the row is deleted from SQLite.
 
-| Field | Description |
-|---|---|
-| `item_name` | Name of the game, product, or item |
-| `code` | Private activation/product/access code |
-| `platform` | Optional platform, such as Steam, Epic, PS5, Xbox |
+---
 
-#### Example With Platform
+## Public Claim Card
 
-```text
-/sharecode item_name: Hollow Knight code: ABC-123-XYZ platform: Steam
-```
-
-#### Example Without Platform
-
-```text
-/sharecode item_name: Celeste code: DEF-456-XYZ
-```
-
-#### Public Output With Platform
+With platform and expiration:
 
 ```text
 Product: Hollow Knight
 Platform: Steam
+Expires: 12/31/2026
 Shared by: @username
 
 Click the button below to claim it instantly via DM.
 ```
 
-#### Public Output Without Platform
+Without platform or expiration:
 
 ```text
 Product: Celeste
@@ -132,67 +164,34 @@ Shared by: @username
 Click the button below to claim it instantly via DM.
 ```
 
-When platform is left blank, the platform line is omitted. The bot does not show `Unknown`.
-
 ---
 
-### `/bulkshare`
+## Expiration Behavior
 
-Opens a private guided bulk-sharing panel.
+Expiration is optional.
 
-The user flow is:
-
-1. Run `/bulkshare`
-2. Read the private instruction panel
-3. Click **Open Bulk Entry Form**
-4. Paste multiple code entries into the modal
-5. Submit the form
-6. CodeClaimer posts one claim card per valid entry
-
-Use one code per line.
-
-#### Format
+Supported formats:
 
 ```text
-Product Name (Platform) | Code
-Product Name | Code
+12/31/2026
+12/31/2026 23:59
 ```
 
-Platform is optional.
+The bot also accepts `YYYY-MM-DD` internally for backward compatibility, but user-facing instructions use `MM/DD/YYYY`.
 
-#### Example
+Date-only expirations are treated as valid through the listed date and expire after that day in UTC.
+
+A background task checks for expired unclaimed codes every 10 minutes. If a user clicks an expired card before the checker catches it, the bot marks it expired immediately.
+
+Expired card text:
 
 ```text
-Hollow Knight (Steam) | ABC-123
-Celeste | DEF-456
-Minecraft Skin Pack (Xbox) | GHI-789
+Code Expired
+
+The code for Product Name was not claimed before it expired.
+
+Expired: MM/DD/YYYY
 ```
-
-Each valid line creates its own claim card.
-
----
-
-## Optional Platform Behavior
-
-Platform is optional in both `/sharecode` and `/bulkshare`.
-
-The bot treats these platform values as blank:
-
-```text
-Unknown
-N/A
-NA
-None
-No Platform
-```
-
-If platform is blank or treated as blank, CodeClaimer omits the platform line from:
-
-- The public claim card
-- The DM claim card
-- The public claimed message
-
-This keeps cards cleaner and avoids unnecessary placeholder text.
 
 ---
 
@@ -200,26 +199,21 @@ This keeps cards cleaner and avoids unnecessary placeholder text.
 
 CodeClaimer rejects submissions containing links, websites, or web addresses.
 
-This applies to:
+Checked fields:
 
 - Product names
 - Platform names
 - Code fields
+- Expiration text
 - Bulk submission text
 
-Rejected submissions show:
-
-```text
-Submission Rejected: Links, websites, and web addresses are strictly prohibited to prevent phishing scams.
-```
-
-This is a basic safety filter to reduce obvious phishing risk. It is not a full moderation or malware detection system.
+This is a basic safety filter. It is not a full moderation or malware detection system.
 
 ---
 
 ## Database
 
-CodeClaimer uses SQLite for persistence.
+CodeClaimer uses SQLite.
 
 ### `shared_codes`
 
@@ -228,15 +222,14 @@ Stores active, unclaimed codes.
 | Column | Description |
 |---|---|
 | `message_id` | Discord message ID for the public claim card |
-| `product_code` | Hidden code to send by DM |
+| `product_code` | Hidden code sent by DM |
 | `item_name` | Product/game/item name |
-| `platform` | Optional platform associated with the code |
-| `guild_id` | Discord server ID where the claim card was posted |
-| `channel_id` | Discord channel ID where the claim card was posted |
+| `platform` | Optional platform |
+| `expires_at` | Optional expiration text |
+| `guild_id` | Discord server ID |
+| `channel_id` | Discord channel ID |
 | `sharer_id` | Discord user ID of the member who shared the code |
 | `created_at` | UTC timestamp for when the claim card was created |
-
-When a code is successfully claimed, the row is deleted from the database.
 
 ### `guild_settings`
 
@@ -247,91 +240,47 @@ Stores server-specific settings.
 | `guild_id` | Discord server ID |
 | `mods_only` | `1` means Mods Only is ON, `0` means Mods Only is OFF |
 
----
-
-## Server Data Separation
-
-CodeClaimer stores `guild_id`, `channel_id`, and `sharer_id` with every shared code.
-
-The claim system still uses `message_id` as the primary lookup because Discord message IDs are globally unique. The added metadata prepares the bot for future server-specific tools like:
-
-- `/listcodes`
-- `/cleanup`
-- `/serverstats`
-- `/repost`
-- Claim history logs
-- Moderator exports
-
----
-
-## Database Migration
-
-CodeClaimer includes automatic migration support for the `shared_codes` table.
-
-If an existing SQLite database was created before the metadata columns existed, the bot adds them automatically on startup:
-
-```text
-guild_id
-channel_id
-sharer_id
-created_at
-```
-
-This lets existing installs update without wiping active data.
+The bot includes startup migrations for new `shared_codes` columns, so existing databases can update without wiping active data.
 
 ---
 
 ## Persistence
 
-CodeClaimer is designed so active claim cards and settings survive bot restarts, Railway redeploys, and new GitHub commits.
+CodeClaimer is designed so active claim buttons work after bot restarts, Railway redeploys, and GitHub commits.
 
-Persistence depends on three things:
+Persistence depends on:
 
-1. Active code data is saved in SQLite by Discord `message_id`.
-2. The claim button uses a fixed persistent `custom_id`.
-3. The bot re-registers the claim button view on startup using `setup_hook()`.
+1. Active code data saved in SQLite by Discord `message_id`
+2. A fixed persistent button `custom_id`
+3. Re-registering the persistent view during startup
 
-The persistent claim button uses:
+Relevant code behavior:
 
 ```python
 timeout=None
-```
-
-and a fixed button ID:
-
-```python
 custom_id="codeclaimer_claim_code_btn"
-```
-
-The bot also runs:
-
-```python
 self.add_view(ClaimButtonView())
 ```
 
-inside `setup_hook()`.
-
-This is what lets older claim buttons continue working after a restart or redeploy.
+For persistence to survive Railway redeploys, the SQLite file must live on a mounted Railway volume.
 
 ---
 
 ## Railway Setup
 
-CodeClaimer keeps sensitive values out of GitHub.
-
-### Required Variable
+Required variable:
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token_here
 ```
 
-### Recommended Variable For Persistent SQLite
+Recommended for persistent SQLite:
 
 ```env
 DB_PATH=/data/codes.db
 ```
 
-Use this when you have a Railway volume mounted at:
+Mount a Railway volume at:
 
 ```text
 /data
@@ -343,19 +292,19 @@ If `DB_PATH` is not set, the bot defaults to:
 data/codes.db
 ```
 
-For Railway production, use a mounted volume so the SQLite database survives redeploys. Without a mounted volume, Railway may wipe the local SQLite file during redeploys.
+Without a mounted volume, Railway may wipe the local SQLite database during redeploys.
 
 ---
 
-## Required Python Packages
+## Requirements
 
-Create a `requirements.txt` file with:
+`requirements.txt`:
 
 ```text
 discord.py
 ```
 
-The bot also uses Python standard library modules:
+Standard library modules used:
 
 - `os`
 - `re`
@@ -366,13 +315,13 @@ The bot also uses Python standard library modules:
 
 ---
 
-## Recommended Start Command
+## Start Command
 
 ```bash
 python bot.py
 ```
 
-If your environment uses Python 3 explicitly:
+or:
 
 ```bash
 python3 bot.py
@@ -382,18 +331,14 @@ python3 bot.py
 
 ## Discord Developer Portal Setup
 
-### OAuth2 Scopes
-
-Use these scopes:
+OAuth2 scopes:
 
 ```text
 bot
 applications.commands
 ```
 
-### Bot Permissions
-
-Use these permissions:
+Recommended bot permissions:
 
 ```text
 Send Messages
@@ -401,9 +346,7 @@ Manage Messages
 Read Message History
 ```
 
-### Privileged Gateway Intents
-
-Enable:
+Privileged Gateway Intent currently used:
 
 ```text
 Message Content Intent
@@ -415,51 +358,29 @@ Most of the bot uses slash commands, but this was part of the current setup and 
 
 ## Security Notes
 
-- Never hardcode the Discord bot token inside `bot.py`.
+- Never hardcode the Discord bot token in `bot.py`.
 - Store the token in Railway as `DISCORD_TOKEN`.
-- If the token was ever committed to GitHub, reset it in the Discord Developer Portal.
-- Do not share screenshots or pasted code that include the token.
-- Mods Only is ON by default for safer server rollout.
-- The anti-phishing filter helps reduce risk, but it is not a complete moderation system.
-
----
-
-## Support
-
-The Ko-fi link lives in the `/settings` panel as a button:
-
-```text
-Support CodeClaimer
-```
-
-It links to:
-
-```text
-https://ko-fi.com/artchemylabs
-```
-
-You can also support development and hosting here:
-
-[ko-fi.com/artchemylabs](https://ko-fi.com/artchemylabs)
+- If a token was ever committed to GitHub, reset it in the Discord Developer Portal.
+- Do not commit `.env`, SQLite databases, or local data folders.
+- Mods Only is ON by default for safer rollout.
+- The anti-phishing filter helps reduce obvious risk but does not replace moderation.
 
 ---
 
 ## Future Feature Ideas
 
-Possible next features:
+The database now stores enough metadata to support:
 
-- Admin cleanup command
-- Claim history log channel
-- Optional cooldowns to prevent one user from claiming too many codes
-- Role restrictions for claiming, not just sharing
-- Platform dropdown choices
-- Anonymous sharing option
-- Public stats command
-- Better duplicate claim protection under heavy traffic
-- Better skipped-entry reporting for bulk uploads
-- Exportable claim/share history for moderators
-- Server-specific active code list
-- Repost active code cards after channel cleanup
+- `/listcodes`
+- `/cleanup`
+- `/serverstats`
+- `/repost`
+- Claim history logs
+- Moderator exports
+- Server-specific active code lists
+- Reposting active code cards after channel cleanup
+- Role restrictions for claiming
+- Cooldowns to prevent one user from claiming too many codes
 
 ---
 
@@ -468,3 +389,11 @@ Possible next features:
 CodeClaimer is open-source under the MIT License.
 
 You can inspect, modify, self-host, and contribute to the project. The official hosted bot is maintained independently and supported through Ko-fi donations.
+
+---
+
+## Support
+
+Support development and hosting:
+
+[ko-fi.com/artchemylabs](https://ko-fi.com/artchemylabs)

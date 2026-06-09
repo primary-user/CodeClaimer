@@ -19,7 +19,10 @@ if not BOT_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable.")
 
 DB_PATH = os.getenv("DB_PATH", "data/codes.db")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 TITLE_PHRASES = [
     "Free Code Available!",
@@ -40,8 +43,13 @@ TITLE_PHRASES = [
 # ---------------------------------------------------------------------------
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL mode: readers never block writers and writers never block readers.
+    # Critical for concurrent claim callbacks + expiration task running together.
+    conn.execute("PRAGMA journal_mode=WAL")
+    # Flush WAL to the main DB file after each write so data survives a crash.
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -49,7 +57,7 @@ def init_db() -> None:
     with get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS shared_codes (
-                message_id  INTEGER PRIMARY KEY,
+                message_id   INTEGER PRIMARY KEY,
                 product_code TEXT NOT NULL,
                 item_name    TEXT NOT NULL,
                 platform     TEXT NOT NULL DEFAULT '',
@@ -57,6 +65,7 @@ def init_db() -> None:
                 guild_id     INTEGER,
                 channel_id   INTEGER,
                 sharer_id    INTEGER,
+                sharer_name  TEXT,
                 created_at   TEXT
             )
         """)
@@ -67,21 +76,43 @@ def init_db() -> None:
             )
         """)
 
-        # Forward migrations — safe to run on existing databases
-        existing = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(shared_codes)")
-        }
-        for col, definition in [
-            ("guild_id",   "INTEGER"),
-            ("channel_id", "INTEGER"),
-            ("sharer_id",  "INTEGER"),
-            ("created_at", "TEXT"),
-            ("expires_at", "TEXT NOT NULL DEFAULT ''"),
-        ]:
+        # Forward migrations — safe on existing databases, never drops data
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(shared_codes)")}
+        migrations = [
+            ("guild_id",    "INTEGER"),
+            ("channel_id",  "INTEGER"),
+            ("sharer_id",   "INTEGER"),
+            ("sharer_name", "TEXT"),
+            ("created_at",  "TEXT"),
+            ("expires_at",  "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col, definition in migrations:
             if col not in existing:
                 conn.execute(f"ALTER TABLE shared_codes ADD COLUMN {col} {definition}")
 
+        # Index for fast expiration lookups — safe to run if it already exists
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shared_codes_expires_at
+            ON shared_codes (expires_at)
+            WHERE expires_at IS NOT NULL AND expires_at != ''
+        """)
+
+        conn.commit()
+
+
+def seed_guild_settings(guild_ids: list[int]) -> None:
+    """
+    Insert a default row for any guild that does not already have one.
+    INSERT OR IGNORE means existing settings are never overwritten —
+    including servers that have toggled Mods Only OFF.
+    """
+    if not guild_ids:
+        return
+    with get_db() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
+            [(gid,) for gid in guild_ids],
+        )
         conn.commit()
 
 
@@ -92,8 +123,10 @@ def init_db() -> None:
 _LINK_RE = re.compile(
     r"(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/[^\s]*)?)"
 )
-_JUNK_VALUES = {"unknown", "n/a", "na", "none", "no platform",
-                "no expiration", "never", "no expiry", "no expire"}
+_JUNK_VALUES = frozenset({
+    "unknown", "n/a", "na", "none", "no platform",
+    "no expiration", "never", "no expiry", "no expire",
+})
 
 
 def contains_link(text: str) -> bool:
@@ -147,7 +180,7 @@ def parse_expiration_datetime(expires_at: str | None) -> datetime | None:
             if m.group(4) and m.group(5):
                 return datetime(year, month, day, int(m.group(4)), int(m.group(5)),
                                 tzinfo=timezone.utc)
-            # Date-only: expires at end of that day (midnight next day UTC)
+            # Date-only: treat as expiring at end of that day (midnight UTC next day)
             return datetime(year, month, day, tzinfo=timezone.utc) + timedelta(days=1)
         except ValueError:
             return None
@@ -166,7 +199,7 @@ def is_expired(expires_at: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Card description builders
+# Embed builders
 # ---------------------------------------------------------------------------
 
 def format_platform_line(platform: str | None) -> str:
@@ -180,12 +213,11 @@ def format_expiration_line(expires_at: str | None) -> str:
 
 
 def build_expired_embed(item_name: str, platform: str, expires_at: str) -> discord.Embed:
-    display_platform = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
+    suffix = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
     return discord.Embed(
         title="Code Expired",
         description=(
-            f"The code for **{item_name}**{display_platform} "
-            f"was not claimed before it expired.\n\n"
+            f"The code for **{item_name}**{suffix} was not claimed before it expired.\n\n"
             f"**Expired:** {clean_expiration(expires_at)}"
         ),
         color=discord.Color.dark_grey(),
@@ -196,15 +228,25 @@ def build_claimed_embed(
     item_name: str,
     platform: str,
     claimer_mention: str,
-    sharer_mention: str,
+    sharer_display: str,
 ) -> discord.Embed:
-    display_platform = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
+    suffix = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
     return discord.Embed(
         title="Loot Claimed!",
         description=(
-            f"The code for **{item_name}**{display_platform} has been successfully "
-            f"claimed by {claimer_mention}!\n\n"
-            f"Thank you to {sharer_mention} for sharing with the community!"
+            f"The code for **{item_name}**{suffix} has been claimed by {claimer_mention}!\n\n"
+            f"Thank you to {sharer_display} for sharing with the community!"
+        ),
+        color=discord.Color.dark_grey(),
+    )
+
+
+def build_already_claimed_embed() -> discord.Embed:
+    return discord.Embed(
+        title="Already Claimed",
+        description=(
+            "This code has already been claimed by someone else.\n\n"
+            "Keep an eye out for future drops!"
         ),
         color=discord.Color.dark_grey(),
     )
@@ -224,7 +266,7 @@ def parse_bulk_label(label: str) -> tuple[str, str]:
 
 def parse_bulk_entry(entry: str) -> tuple[str, str, str, str] | None:
     """
-    Parse one line:  Product Name (Platform): Code | MM/DD/YYYY
+    Parse: Product Name (Platform): Code | MM/DD/YYYY
     Returns (item_name, platform, product_code, expires_at) or None.
     """
     entry = entry.strip()
@@ -239,7 +281,7 @@ def parse_bulk_entry(entry: str) -> tuple[str, str, str, str] | None:
     if "|" in rest:
         product_code, expires_at = rest.rsplit("|", 1)
         product_code = product_code.strip()
-        expires_at = clean_expiration(expires_at)
+        expires_at   = clean_expiration(expires_at)
     else:
         product_code, expires_at = rest.strip(), ""
 
@@ -253,7 +295,7 @@ def parse_bulk_entry(entry: str) -> tuple[str, str, str, str] | None:
 def split_bulk_entries(raw_text: str) -> list[str]:
     """Split on newlines (preferred) or semicolons (fallback)."""
     if "\n" in raw_text:
-        return [l.strip() for l in raw_text.splitlines() if l.strip()]
+        return [line.strip() for line in raw_text.splitlines() if line.strip()]
     if ";" in raw_text:
         return [e.strip() for e in raw_text.split(";") if e.strip()]
     return [raw_text.strip()] if raw_text.strip() else []
@@ -277,7 +319,8 @@ def get_mods_only(guild_id: int) -> bool:
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO guild_settings (guild_id, mods_only) VALUES (?, 1)", (guild_id,)
+                "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
+                (guild_id,)
             )
             conn.commit()
             return True
@@ -338,19 +381,28 @@ async def post_claim_card(
 
     msg = await channel.send(embed=embed, view=view)
 
+    # Store sharer_name so claimed embed can display it even if the user
+    # leaves the server before someone claims the code.
+    sharer_name = getattr(sharer, "display_name", None) or getattr(sharer, "name", "Someone")
+
     with get_db() as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO shared_codes
                 (message_id, product_code, item_name, platform, expires_at,
-                 guild_id, channel_id, sharer_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 guild_id, channel_id, sharer_id, sharer_name, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                msg.id, product_code, item_name, platform, expires_at,
+                msg.id,
+                product_code,
+                item_name,
+                platform,
+                expires_at,
                 getattr(getattr(channel, "guild", None), "id", None),
                 getattr(channel, "id", None),
                 getattr(sharer, "id", None),
+                sharer_name,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -366,14 +418,13 @@ async def mark_code_expired(
     expires_at: str,
     channel_id: int | None,
 ) -> None:
-    """Edit the public card to show it has expired, then remove it from the DB."""
+    """Remove DB row then edit the public card to show it has expired."""
 
-    # Always remove the DB row first so a second click or task run cannot race
+    # Delete first — prevents race between expiration task and a simultaneous click
     with get_db() as conn:
         conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (message_id,))
         conn.commit()
 
-    # Attempt to update the Discord message
     channel = bot.get_channel(channel_id) if channel_id else None
     if channel is None and channel_id:
         try:
@@ -383,8 +434,8 @@ async def mark_code_expired(
                   f"for message {message_id}: {exc}")
 
     if channel is None:
-        print(f"[Expiration] No channel available for message {message_id} — "
-              "DB row removed but Discord card not updated.")
+        print(f"[Expiration] No channel for message {message_id} — "
+              "DB row removed, Discord card not updated.")
         return
 
     try:
@@ -395,12 +446,12 @@ async def mark_code_expired(
         )
         print(f"[Expiration] Marked message {message_id} as expired.")
     except discord.NotFound:
-        print(f"[Expiration] Message {message_id} already deleted — nothing to edit.")
+        print(f"[Expiration] Message {message_id} already deleted.")
     except discord.Forbidden:
-        print(f"[Expiration] Missing permissions to edit message {message_id} "
+        print(f"[Expiration] No permission to edit message {message_id} "
               f"in channel {channel_id}.")
     except discord.HTTPException as exc:
-        print(f"[Expiration] HTTP error editing message {message_id}: {exc}")
+        print(f"[Expiration] HTTP error on message {message_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +483,8 @@ class ClaimButtonView(discord.ui.View):
         with get_db() as conn:
             row = conn.execute(
                 """
-                SELECT product_code, item_name, platform, expires_at, channel_id
+                SELECT product_code, item_name, platform, expires_at,
+                       channel_id, sharer_id, sharer_name
                 FROM shared_codes WHERE message_id = ?
                 """,
                 (msg_id,),
@@ -444,36 +496,35 @@ class ClaimButtonView(discord.ui.View):
             platform_to_send = clean_platform(row["platform"])
             expires_to_send  = clean_expiration(row["expires_at"])
             channel_id       = row["channel_id"]
+            # Prefer stored sharer_name over parsing the embed description.
+            # Falls back to mention if sharer_id is resolvable, then name string.
+            sharer_id        = row["sharer_id"]
+            sharer_name_db   = row["sharer_name"] or "Someone"
+            sharer_display   = f"<@{sharer_id}>" if sharer_id else sharer_name_db
         else:
-            # Fallback: in-memory values from when the view was created
-            code_to_send     = self.product_code
-            item_to_send     = self.item_name
-            platform_to_send = self.platform
-            expires_to_send  = self.expires_at
-            channel_id       = getattr(interaction.channel, "id", None)
-
-        if not code_to_send:
-            # Code is gone from DB — card was never cleaned up.
-            # Fix the card now so no one else gets stuck clicking it.
-            fallback_embed = discord.Embed(
-                title="Already Claimed",
-                description=(
-                    "This code has already been claimed by someone else.\n\n"
-                    "Keep an eye out for future drops!"
-                ),
-                color=discord.Color.dark_grey(),
-            )
+            # No DB row — card is stale (claimed elsewhere, DB wiped, or bot restarted
+            # before this view was re-registered). Clean the card up now.
             try:
-                await interaction.message.edit(embed=fallback_embed, view=None)
+                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
                 print(f"[Claim] Could not clean up stale card {msg_id}: {exc}")
-
             await interaction.response.send_message(
                 "This code has already been claimed!", ephemeral=True
             )
             return
 
-        # Handle expired card clicked before the background task caught it
+        # Card exists in DB but code value is somehow empty — treat as stale
+        if not code_to_send:
+            try:
+                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                print(f"[Claim] Could not clean up empty card {msg_id}: {exc}")
+            await interaction.response.send_message(
+                "This code has already been claimed!", ephemeral=True
+            )
+            return
+
+        # Expired card clicked before the background task caught it
         if is_expired(expires_to_send):
             await mark_code_expired(
                 message_id=msg_id,
@@ -489,7 +540,7 @@ class ClaimButtonView(discord.ui.View):
 
         display_platform = f" ({platform_to_send})" if platform_to_send else ""
 
-        # Send DM first — if it fails we do not mark anything as claimed
+        # Build and send DM first — if it fails nothing is marked as claimed
         dm_embed = discord.Embed(
             title="🎁 Code Successfully Claimed!",
             description=f"Here is your activation key for **{item_to_send}**{display_platform}:",
@@ -513,7 +564,7 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # DM delivered — now commit the claim
+        # DM delivered — commit the claim by removing the DB row
         with get_db() as conn:
             conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
@@ -522,26 +573,19 @@ class ClaimButtonView(discord.ui.View):
             "The code has been sent to your DMs!", ephemeral=True
         )
 
-        # Extract sharer mention from the existing embed description
-        sharer_mention = "Someone"
-        if interaction.message.embeds and interaction.message.embeds[0].description:
-            for line in interaction.message.embeds[0].description.split("\n"):
-                if "Shared by:" in line:
-                    sharer_mention = line.replace("**Shared by:**", "").strip()
-                    break
-
+        # Update the public card to claimed state
         try:
             await interaction.message.edit(
                 embed=build_claimed_embed(
                     item_name=item_to_send,
                     platform=platform_to_send,
                     claimer_mention=interaction.user.mention,
-                    sharer_mention=sharer_mention,
+                    sharer_display=sharer_display,
                 ),
                 view=None,
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-            print(f"[Claim] Could not update public card for message {msg_id}: {exc}")
+            print(f"[Claim] Could not update public card {msg_id}: {exc}")
 
 
 class SettingsView(discord.ui.View):
@@ -729,7 +773,11 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
         ),
         inline=False,
     )
-    embed.add_field(name="Support", value="Use the button below to support CodeClaimer.", inline=False)
+    embed.add_field(
+        name="Support",
+        value="Use the button below to support CodeClaimer.",
+        inline=False,
+    )
     return embed
 
 
@@ -744,9 +792,8 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Re-register every persistent view on startup so buttons on old
-        # messages keep working after a restart or redeploy.
-        # timeout=None + a fixed custom_id is what makes a view persistent.
+        # Re-register all persistent views on startup.
+        # timeout=None + fixed custom_id = button works after any restart.
         self.add_view(ClaimButtonView())
         self.add_view(BulkSharePanelView())
 
@@ -760,34 +807,38 @@ bot = CodeBot()
 
 @tasks.loop(minutes=10)
 async def expire_unclaimed_codes():
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT message_id, item_name, platform, expires_at, channel_id
-            FROM shared_codes
-            WHERE expires_at IS NOT NULL AND expires_at != ''
-            """
-        ).fetchall()
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id, item_name, platform, expires_at, channel_id
+                FROM shared_codes
+                WHERE expires_at IS NOT NULL AND expires_at != ''
+                """
+            ).fetchall()
 
-    if not rows:
-        return
+        if not rows:
+            return
 
-    expired = [r for r in rows if is_expired(r["expires_at"])]
+        expired = [r for r in rows if is_expired(r["expires_at"])]
+        if not expired:
+            return
 
-    if not expired:
-        return
+        print(f"[Expiration] Processing {len(expired)} expired code(s).")
 
-    print(f"[Expiration] Found {len(expired)} expired code(s) to process.")
+        for row in expired:
+            await mark_code_expired(
+                message_id=row["message_id"],
+                item_name=row["item_name"],
+                platform=row["platform"],
+                expires_at=row["expires_at"],
+                channel_id=row["channel_id"],
+            )
+            await asyncio.sleep(0.4)
 
-    for row in expired:
-        await mark_code_expired(
-            message_id=row["message_id"],
-            item_name=row["item_name"],
-            platform=row["platform"],
-            expires_at=row["expires_at"],
-            channel_id=row["channel_id"],
-        )
-        await asyncio.sleep(0.4)
+    except Exception as exc:
+        # Log but do not let the task die — it will retry on the next loop iteration
+        print(f"[Expiration] Unhandled error in expiration task: {exc}")
 
 
 @expire_unclaimed_codes.before_loop
@@ -799,28 +850,13 @@ async def before_expire():
 # Events
 # ---------------------------------------------------------------------------
 
-def seed_guild_settings(guild_ids: list[int]) -> None:
-    """
-    Insert a default settings row for any guild that does not already have one.
-    Uses INSERT OR IGNORE so existing settings — including servers that have
-    toggled Mods Only OFF — are never overwritten.
-    """
-    with get_db() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
-            [(gid,) for gid in guild_ids],
-        )
-        conn.commit()
-
-
 @bot.event
 async def on_ready():
     init_db()
     print(f"Logged in as {bot.user.name}")
     print(f"Database: {DB_PATH}")
 
-    # Seed settings for every guild the bot is currently in.
-    # INSERT OR IGNORE means existing rows (and their saved settings) are untouched.
+    # Seed settings for all current guilds without overwriting saved settings
     seed_guild_settings([g.id for g in bot.guilds])
     print(f"Guild settings seeded for {len(bot.guilds)} server(s).")
 
@@ -837,10 +873,20 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # Seed settings when the bot is added to a new server.
-    # INSERT OR IGNORE so re-inviting after a kick does not reset saved settings.
+    # Seed settings for new server — INSERT OR IGNORE preserves saved settings
+    # if the bot is re-invited after a kick
     seed_guild_settings([guild.id])
-    print(f"Joined guild {guild.name} ({guild.id}) — settings seeded.")
+    print(f"Joined {guild.name} ({guild.id}) — settings seeded.")
+
+
+@bot.event
+async def on_disconnect():
+    print("[Connection] Bot disconnected from Discord.")
+
+
+@bot.event
+async def on_resumed():
+    print("[Connection] Bot connection resumed.")
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +1031,7 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/settings",
-        value="Toggle Mods Only on or off. Moderator access is based on Administrator, Manage Server, or Manage Messages.",
+        value="Toggle Mods Only on or off. Moderator = Administrator, Manage Server, or Manage Messages.",
         inline=False,
     )
     embed.add_field(

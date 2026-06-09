@@ -799,11 +799,30 @@ async def before_expire():
 # Events
 # ---------------------------------------------------------------------------
 
+def seed_guild_settings(guild_ids: list[int]) -> None:
+    """
+    Insert a default settings row for any guild that does not already have one.
+    Uses INSERT OR IGNORE so existing settings — including servers that have
+    toggled Mods Only OFF — are never overwritten.
+    """
+    with get_db() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
+            [(gid,) for gid in guild_ids],
+        )
+        conn.commit()
+
+
 @bot.event
 async def on_ready():
     init_db()
     print(f"Logged in as {bot.user.name}")
     print(f"Database: {DB_PATH}")
+
+    # Seed settings for every guild the bot is currently in.
+    # INSERT OR IGNORE means existing rows (and their saved settings) are untouched.
+    seed_guild_settings([g.id for g in bot.guilds])
+    print(f"Guild settings seeded for {len(bot.guilds)} server(s).")
 
     if not expire_unclaimed_codes.is_running():
         expire_unclaimed_codes.start()
@@ -814,6 +833,14 @@ async def on_ready():
         print("Slash commands synced.")
     except Exception as exc:
         print(f"Failed to sync commands: {exc}")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # Seed settings when the bot is added to a new server.
+    # INSERT OR IGNORE so re-inviting after a kick does not reset saved settings.
+    seed_guild_settings([guild.id])
+    print(f"Joined guild {guild.name} ({guild.id}) — settings seeded.")
 
 
 # ---------------------------------------------------------------------------

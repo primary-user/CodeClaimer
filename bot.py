@@ -679,7 +679,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
 
 class BulkSharePanelView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=600)
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Open Bulk Entry Form",
@@ -744,7 +744,11 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
+        # Re-register every persistent view on startup so buttons on old
+        # messages keep working after a restart or redeploy.
+        # timeout=None + a fixed custom_id is what makes a view persistent.
         self.add_view(ClaimButtonView())
+        self.add_view(BulkSharePanelView())
 
 
 bot = CodeBot()

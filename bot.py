@@ -452,11 +452,26 @@ class ClaimButtonView(discord.ui.View):
             expires_to_send  = self.expires_at
             channel_id       = getattr(interaction.channel, "id", None)
 
-        if not code_to_send:
-            await interaction.response.send_message(
-                "This code has already been claimed!", ephemeral=True
-            )
-            return
+if not code_to_send:
+    # Code is gone from DB — card was never cleaned up.
+    # Fix the card now so no one else gets stuck clicking it.
+    fallback_embed = discord.Embed(
+        title="Already Claimed",
+        description=(
+            "This code has already been claimed by someone else.\n\n"
+            "Keep an eye out for future drops!"
+        ),
+        color=discord.Color.dark_grey(),
+    )
+    try:
+        await interaction.message.edit(embed=fallback_embed, view=None)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        print(f"[Claim] Could not clean up stale card {msg_id}: {exc}")
+
+    await interaction.response.send_message(
+        "This code has already been claimed!", ephemeral=True
+    )
+    return
 
         # Handle expired card clicked before the background task caught it
         if is_expired(expires_to_send):

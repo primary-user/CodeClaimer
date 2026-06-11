@@ -1006,7 +1006,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         style=discord.TextStyle.short,
         required=False,
         max_length=500,
-        placeholder="e.g. 🎮 Game drop from @Crimsonx0611! One per person!",
+        placeholder="e.g. 🎮 Game drop from @Username! One per person!",
     )
 
     batch_data = discord.ui.TextInput(

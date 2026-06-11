@@ -14,12 +14,14 @@ Instead of posting codes in public chat, members submit them through slash comma
 - Expired unclaimed cards automatically marked as expired
 - First-come, first-served DM delivery
 - Claimed and expired cards are greyed out with the button removed
-- Stale cards (claimed elsewhere or after a restart) self-clean on next click
-- Persistent SQLite database
+- Stale cards self-clean on next click
+- **One Claim Per Batch** — optionally limit members to one claim per `/bulkshare` drop
+- Persistent SQLite database with WAL mode
 - Persistent claim buttons across restarts and redeploys
+- Per-server settings that survive bot restarts and DB wipes
 - Anti-phishing link filter on all input fields
-- `/settings` with Mods Only toggle
-- Mods Only is ON by default
+- `/settings` with Mods Only and One Claim Per Batch toggles
+- Mods Only is ON by default, One Claim Per Batch is OFF by default
 
 ---
 
@@ -39,6 +41,8 @@ Instead of posting codes in public chat, members submit them through slash comma
 /sharecode item_name: Celeste code: DEF-456
 ```
 
+Single `/sharecode` drops are not subject to the One Claim Per Batch setting.
+
 ---
 
 ### `/bulkshare`
@@ -55,22 +59,29 @@ Examples:
 ```text
 Hollow Knight (Steam): ABC-123 | 12/31/2026
 Celeste: DEF-456
-Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026
+Outer Wilds (Steam, courtesy of Username): GHI-789 | 10/01/2026
 ```
 
 - `:` separates the product label from the code
 - `|` precedes the optional expiration date
+- Platform is flexible — supports any text including attribution
 - Each valid line creates its own claim card
+- All cards from one modal submission share a `batch_id` for One Claim Per Batch enforcement
 
 ---
 
 ### `/settings`
 
-Opens the server settings panel with a **Mods Only** toggle and Ko-fi support button.
+Opens the server settings panel. Only moderators can change settings.
 
-Only moderators can change settings. Moderator = Administrator, Manage Server, or Manage Messages.
+Moderator = Administrator, Manage Server, or Manage Messages.
 
-When Mods Only is ON, only moderators can use `/sharecode` and `/bulkshare`. Claiming is open to anyone who can see the card.
+| Setting | Default | Description |
+|---|---|---|
+| Mods Only | ON | Restricts `/sharecode` and `/bulkshare` to moderators |
+| One Claim Per Batch | OFF | Limits each member to one claim per `/bulkshare` drop |
+
+Settings are stored per server and persist across bot restarts, redeploys, and database wipes. `INSERT OR IGNORE` ensures existing settings are never overwritten when the bot restarts or joins a server.
 
 ---
 
@@ -88,9 +99,11 @@ Shows private usage instructions. Ephemeral.
 4. The first user to click receives the code by DM
 5. The card is marked as claimed, the button is removed, and the DB row is deleted
 
-If a code expires before being claimed, a background task (runs every 10 minutes) marks the card as expired and removes the button. If a user clicks an expired card before the task catches it, the bot handles it immediately.
+If **One Claim Per Batch** is ON and a user has already claimed from that batch, they are blocked with an ephemeral message. The card remains live for others.
 
-If a card is left over from a previous session with no matching DB row (e.g. after a wipe), the next click on that card will grey it out and mark it as already claimed automatically.
+If a code expires before being claimed, a background task (runs every 10 minutes) marks the card as expired. If a user clicks an expired card before the task catches it, the bot handles it immediately.
+
+If a card has no matching DB row (e.g. after a DB wipe), the next click greys it out automatically.
 
 ---
 
@@ -103,19 +116,27 @@ Optional. Supported formats:
 12/31/2026 23:59
 ```
 
-Date-only values expire at the end of that day in UTC. The bot also accepts `YYYY-MM-DD` for backward compatibility.
+Date-only values expire at the end of that day in UTC. `YYYY-MM-DD` is also accepted for backward compatibility.
+
+---
+
+## One Claim Per Batch
+
+When enabled, each server member can claim at most one code per `/bulkshare` drop. All cards posted from a single bulk submission share a `batch_id`. When a user claims any card in that batch, their user ID is recorded in the `batch_claims` table. Subsequent claim attempts from the same batch return an ephemeral rejection.
+
+This setting does not apply to `/sharecode` single drops.
 
 ---
 
 ## Anti-Phishing
 
-All input fields are checked for links and web addresses before posting. Submissions containing URLs are rejected silently to the submitter only.
+All input fields are checked for links and web addresses before posting. Submissions containing URLs are rejected with an ephemeral message to the submitter only.
 
 ---
 
 ## Database
 
-SQLite. Two tables.
+SQLite with WAL journal mode. Three tables.
 
 ### `shared_codes`
 
@@ -129,7 +150,9 @@ SQLite. Two tables.
 | `guild_id` | Server ID |
 | `channel_id` | Channel ID |
 | `sharer_id` | User ID of the sharer |
+| `sharer_name` | Display name of the sharer at time of posting |
 | `created_at` | UTC timestamp |
+| `batch_id` | UUID linking cards from the same `/bulkshare` submission |
 
 ### `guild_settings`
 
@@ -137,6 +160,16 @@ SQLite. Two tables.
 |---|---|
 | `guild_id` | Server ID |
 | `mods_only` | `1` = ON, `0` = OFF |
+| `one_claim_per_batch` | `1` = ON, `0` = OFF |
+
+### `batch_claims`
+
+| Column | Description |
+|---|---|
+| `batch_id` | UUID of the bulk share batch |
+| `user_id` | Discord user ID of the claimer |
+| `guild_id` | Server ID |
+| `claimed_at` | UTC timestamp |
 
 Startup migrations handle new columns on existing databases without wiping data.
 
@@ -174,10 +207,12 @@ DISCORD_TOKEN=your_discord_bot_token_here
 Recommended:
 
 ```env
-DB_PATH=/data/codes.db
+DB_PATH=/app/data/codes.db
 ```
 
-Mount a Railway volume at `/data`. Without a mounted volume, the SQLite database may be wiped on redeploy.
+Mount a Railway volume at `/app/data`. The mount path and `DB_PATH` must match. Without a mounted volume, the SQLite database is wiped on every redeploy, resetting all active codes.
+
+Guild settings use `INSERT OR IGNORE` on every startup, so even if the database is wiped, the bot will re-seed default settings for all current guilds without overwriting any that have been customized.
 
 ---
 
@@ -199,7 +234,7 @@ Manage Messages
 Read Message History
 ```
 
-> **Read Message History** is required. The bot calls `fetch_message()` to edit claim cards after expiration or on restart. Without it, expired and stale cards will not update and the bot will log a permissions error.
+> **Read Message History** is required. The bot calls `fetch_message()` to edit claim cards after expiration or on restart. Without it, expired and stale cards will not update.
 
 Privileged Gateway Intent:
 
@@ -215,7 +250,7 @@ Message Content Intent
 discord.py
 ```
 
-Standard library: `os`, `re`, `random`, `asyncio`, `sqlite3`, `datetime`
+Standard library: `os`, `re`, `random`, `asyncio`, `sqlite3`, `uuid`, `datetime`
 
 ---
 

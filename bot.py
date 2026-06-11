@@ -3,6 +3,7 @@ import re
 import random
 import asyncio
 import sqlite3
+import uuid
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -45,10 +46,7 @@ TITLE_PHRASES = [
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    # WAL mode: readers never block writers and writers never block readers.
-    # Critical for concurrent claim callbacks + expiration task running together.
     conn.execute("PRAGMA journal_mode=WAL")
-    # Flush WAL to the main DB file after each write so data survives a crash.
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
@@ -66,35 +64,55 @@ def init_db() -> None:
                 channel_id   INTEGER,
                 sharer_id    INTEGER,
                 sharer_name  TEXT,
-                created_at   TEXT
+                created_at   TEXT,
+                batch_id     TEXT
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id  INTEGER PRIMARY KEY,
-                mods_only INTEGER NOT NULL DEFAULT 1
+                guild_id             INTEGER PRIMARY KEY,
+                mods_only            INTEGER NOT NULL DEFAULT 1,
+                one_claim_per_batch  INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS batch_claims (
+                batch_id  TEXT NOT NULL,
+                user_id   INTEGER NOT NULL,
+                guild_id  INTEGER NOT NULL,
+                claimed_at TEXT,
+                PRIMARY KEY (batch_id, user_id)
             )
         """)
 
         # Forward migrations — safe on existing databases, never drops data
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(shared_codes)")}
-        migrations = [
+        existing_codes = {row[1] for row in conn.execute("PRAGMA table_info(shared_codes)")}
+        for col, definition in [
             ("guild_id",    "INTEGER"),
             ("channel_id",  "INTEGER"),
             ("sharer_id",   "INTEGER"),
             ("sharer_name", "TEXT"),
             ("created_at",  "TEXT"),
             ("expires_at",  "TEXT NOT NULL DEFAULT ''"),
-        ]
-        for col, definition in migrations:
-            if col not in existing:
+            ("batch_id",    "TEXT"),
+        ]:
+            if col not in existing_codes:
                 conn.execute(f"ALTER TABLE shared_codes ADD COLUMN {col} {definition}")
 
-        # Index for fast expiration lookups — safe to run if it already exists
+        existing_settings = {row[1] for row in conn.execute("PRAGMA table_info(guild_settings)")}
+        if "one_claim_per_batch" not in existing_settings:
+            conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN one_claim_per_batch INTEGER NOT NULL DEFAULT 0"
+            )
+
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_shared_codes_expires_at
             ON shared_codes (expires_at)
             WHERE expires_at IS NOT NULL AND expires_at != ''
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_batch_claims_batch
+            ON batch_claims (batch_id)
         """)
 
         conn.commit()
@@ -103,14 +121,17 @@ def init_db() -> None:
 def seed_guild_settings(guild_ids: list[int]) -> None:
     """
     Insert a default row for any guild that does not already have one.
-    INSERT OR IGNORE means existing settings are never overwritten —
-    including servers that have toggled Mods Only OFF.
+    INSERT OR IGNORE means existing settings — including custom toggles — are
+    never overwritten on restart, redeploy, or DB wipe recovery.
     """
     if not guild_ids:
         return
     with get_db() as conn:
         conn.executemany(
-            "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
+            """
+            INSERT OR IGNORE INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
+            VALUES (?, 1, 0)
+            """,
             [(gid,) for gid in guild_ids],
         )
         conn.commit()
@@ -159,7 +180,6 @@ _ISO_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2}))
 
 
 def parse_expiration_datetime(expires_at: str | None) -> datetime | None:
-    """Return a UTC datetime for the expiration string, or None if blank/invalid."""
     e = clean_expiration(expires_at)
     if not e:
         return None
@@ -180,7 +200,6 @@ def parse_expiration_datetime(expires_at: str | None) -> datetime | None:
             if m.group(4) and m.group(5):
                 return datetime(year, month, day, int(m.group(4)), int(m.group(5)),
                                 tzinfo=timezone.utc)
-            # Date-only: treat as expiring at end of that day (midnight UTC next day)
             return datetime(year, month, day, tzinfo=timezone.utc) + timedelta(days=1)
         except ValueError:
             return None
@@ -257,7 +276,6 @@ def build_already_claimed_embed() -> discord.Embed:
 # ---------------------------------------------------------------------------
 
 def parse_bulk_label(label: str) -> tuple[str, str]:
-    """Split 'Product Name (Platform)' into (item_name, platform)."""
     m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", label.strip())
     if m:
         return m.group(1).strip(), clean_platform(m.group(2))
@@ -265,10 +283,6 @@ def parse_bulk_label(label: str) -> tuple[str, str]:
 
 
 def parse_bulk_entry(entry: str) -> tuple[str, str, str, str] | None:
-    """
-    Parse: Product Name (Platform): Code | MM/DD/YYYY
-    Returns (item_name, platform, product_code, expires_at) or None.
-    """
     entry = entry.strip()
     if ":" not in entry:
         return None
@@ -293,7 +307,6 @@ def parse_bulk_entry(entry: str) -> tuple[str, str, str, str] | None:
 
 
 def split_bulk_entries(raw_text: str) -> list[str]:
-    """Split on newlines (preferred) or semicolons (fallback)."""
     if "\n" in raw_text:
         return [line.strip() for line in raw_text.splitlines() if line.strip()]
     if ";" in raw_text:
@@ -302,7 +315,7 @@ def split_bulk_entries(raw_text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Permission helpers
+# Permission & settings helpers
 # ---------------------------------------------------------------------------
 
 def is_moderator(user) -> bool:
@@ -312,27 +325,54 @@ def is_moderator(user) -> bool:
     return perms.administrator or perms.manage_guild or perms.manage_messages
 
 
-def get_mods_only(guild_id: int) -> bool:
+def _get_guild_settings(guild_id: int) -> sqlite3.Row:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT mods_only FROM guild_settings WHERE guild_id = ?", (guild_id,)
+            "SELECT mods_only, one_claim_per_batch FROM guild_settings WHERE guild_id = ?",
+            (guild_id,)
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only) VALUES (?, 1)",
+                "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only, one_claim_per_batch) VALUES (?, 1, 0)",
                 (guild_id,)
             )
             conn.commit()
-            return True
-        return bool(row["mods_only"])
+            # Re-fetch after insert
+            row = conn.execute(
+                "SELECT mods_only, one_claim_per_batch FROM guild_settings WHERE guild_id = ?",
+                (guild_id,)
+            ).fetchone()
+        return row
+
+
+def get_mods_only(guild_id: int) -> bool:
+    return bool(_get_guild_settings(guild_id)["mods_only"])
+
+
+def get_one_claim_per_batch(guild_id: int) -> bool:
+    return bool(_get_guild_settings(guild_id)["one_claim_per_batch"])
 
 
 def set_mods_only(guild_id: int, enabled: bool) -> None:
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO guild_settings (guild_id, mods_only) VALUES (?, ?)
+            INSERT INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
+            VALUES (?, ?, 0)
             ON CONFLICT(guild_id) DO UPDATE SET mods_only = excluded.mods_only
+            """,
+            (guild_id, 1 if enabled else 0),
+        )
+        conn.commit()
+
+
+def set_one_claim_per_batch(guild_id: int, enabled: bool) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
+            VALUES (?, 1, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET one_claim_per_batch = excluded.one_claim_per_batch
             """,
             (guild_id, 1 if enabled else 0),
         )
@@ -346,6 +386,37 @@ async def user_can_use_bot(interaction: discord.Interaction) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Batch claim tracking
+# ---------------------------------------------------------------------------
+
+def has_claimed_from_batch(batch_id: str, user_id: int) -> bool:
+    """Return True if this user has already claimed a code from this batch."""
+    if not batch_id:
+        return False
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM batch_claims WHERE batch_id = ? AND user_id = ?",
+            (batch_id, user_id)
+        ).fetchone()
+        return row is not None
+
+
+def record_batch_claim(batch_id: str, user_id: int, guild_id: int) -> None:
+    """Record that a user has claimed from this batch."""
+    if not batch_id:
+        return
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO batch_claims (batch_id, user_id, guild_id, claimed_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (batch_id, user_id, guild_id, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Core card actions
 # ---------------------------------------------------------------------------
 
@@ -356,6 +427,7 @@ async def post_claim_card(
     platform: str,
     product_code: str,
     expires_at: str = "",
+    batch_id: str = "",
 ) -> discord.Message:
     platform   = clean_platform(platform)
     expires_at = clean_expiration(expires_at)
@@ -381,8 +453,6 @@ async def post_claim_card(
 
     msg = await channel.send(embed=embed, view=view)
 
-    # Store sharer_name so claimed embed can display it even if the user
-    # leaves the server before someone claims the code.
     sharer_name = getattr(sharer, "display_name", None) or getattr(sharer, "name", "Someone")
 
     with get_db() as conn:
@@ -390,8 +460,8 @@ async def post_claim_card(
             """
             INSERT OR REPLACE INTO shared_codes
                 (message_id, product_code, item_name, platform, expires_at,
-                 guild_id, channel_id, sharer_id, sharer_name, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 guild_id, channel_id, sharer_id, sharer_name, created_at, batch_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 msg.id,
@@ -404,6 +474,7 @@ async def post_claim_card(
                 getattr(sharer, "id", None),
                 sharer_name,
                 datetime.now(timezone.utc).isoformat(),
+                batch_id or None,
             ),
         )
         conn.commit()
@@ -418,9 +489,6 @@ async def mark_code_expired(
     expires_at: str,
     channel_id: int | None,
 ) -> None:
-    """Remove DB row then edit the public card to show it has expired."""
-
-    # Delete first — prevents race between expiration task and a simultaneous click
     with get_db() as conn:
         conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (message_id,))
         conn.commit()
@@ -430,12 +498,10 @@ async def mark_code_expired(
         try:
             channel = await bot.fetch_channel(channel_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-            print(f"[Expiration] Cannot fetch channel {channel_id} "
-                  f"for message {message_id}: {exc}")
+            print(f"[Expiration] Cannot fetch channel {channel_id} for message {message_id}: {exc}")
 
     if channel is None:
-        print(f"[Expiration] No channel for message {message_id} — "
-              "DB row removed, Discord card not updated.")
+        print(f"[Expiration] No channel for message {message_id} — DB row removed, card not updated.")
         return
 
     try:
@@ -448,8 +514,7 @@ async def mark_code_expired(
     except discord.NotFound:
         print(f"[Expiration] Message {message_id} already deleted.")
     except discord.Forbidden:
-        print(f"[Expiration] No permission to edit message {message_id} "
-              f"in channel {channel_id}.")
+        print(f"[Expiration] No permission to edit message {message_id} in channel {channel_id}.")
     except discord.HTTPException as exc:
         print(f"[Expiration] HTTP error on message {message_id}: {exc}")
 
@@ -478,13 +543,14 @@ class ClaimButtonView(discord.ui.View):
         custom_id="codeclaimer_claim_code_btn",
     )
     async def claim_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        msg_id = interaction.message.id
+        msg_id   = interaction.message.id
+        guild_id = interaction.guild.id if interaction.guild else None
 
         with get_db() as conn:
             row = conn.execute(
                 """
                 SELECT product_code, item_name, platform, expires_at,
-                       channel_id, sharer_id, sharer_name
+                       channel_id, sharer_id, sharer_name, batch_id
                 FROM shared_codes WHERE message_id = ?
                 """,
                 (msg_id,),
@@ -496,14 +562,12 @@ class ClaimButtonView(discord.ui.View):
             platform_to_send = clean_platform(row["platform"])
             expires_to_send  = clean_expiration(row["expires_at"])
             channel_id       = row["channel_id"]
-            # Prefer stored sharer_name over parsing the embed description.
-            # Falls back to mention if sharer_id is resolvable, then name string.
             sharer_id        = row["sharer_id"]
             sharer_name_db   = row["sharer_name"] or "Someone"
             sharer_display   = f"<@{sharer_id}>" if sharer_id else sharer_name_db
+            batch_id         = row["batch_id"] or ""
         else:
-            # No DB row — card is stale (claimed elsewhere, DB wiped, or bot restarted
-            # before this view was re-registered). Clean the card up now.
+            # Stale card — clean it up
             try:
                 await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
@@ -513,7 +577,6 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # Card exists in DB but code value is somehow empty — treat as stale
         if not code_to_send:
             try:
                 await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
@@ -524,7 +587,6 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # Expired card clicked before the background task caught it
         if is_expired(expires_to_send):
             await mark_code_expired(
                 message_id=msg_id,
@@ -538,9 +600,18 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
+        # One claim per batch check — only applies to bulk drops in this guild
+        if batch_id and guild_id and get_one_claim_per_batch(guild_id):
+            if has_claimed_from_batch(batch_id, interaction.user.id):
+                await interaction.response.send_message(
+                    "You have already claimed a code from this batch. "
+                    "One claim per batch drop is enabled on this server.",
+                    ephemeral=True,
+                )
+                return
+
         display_platform = f" ({platform_to_send})" if platform_to_send else ""
 
-        # Build and send DM first — if it fails nothing is marked as claimed
         dm_embed = discord.Embed(
             title="🎁 Code Successfully Claimed!",
             description=f"Here is your activation key for **{item_to_send}**{display_platform}:",
@@ -564,16 +635,19 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # DM delivered — commit the claim by removing the DB row
+        # DM delivered — commit claim
         with get_db() as conn:
             conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
+
+        # Record batch claim if applicable
+        if batch_id and guild_id:
+            record_batch_claim(batch_id, interaction.user.id, guild_id)
 
         await interaction.response.send_message(
             "The code has been sent to your DMs!", ephemeral=True
         )
 
-        # Update the public card to claimed state
         try:
             await interaction.message.edit(
                 embed=build_claimed_embed(
@@ -593,14 +667,24 @@ class SettingsView(discord.ui.View):
         super().__init__(timeout=180)
         self.guild_id = guild_id
 
-        mods_only = get_mods_only(guild_id)
-        toggle = discord.ui.Button(
+        mods_only           = get_mods_only(guild_id)
+        one_claim_per_batch = get_one_claim_per_batch(guild_id)
+
+        mods_toggle = discord.ui.Button(
             label="Mods Only: ON" if mods_only else "Mods Only: OFF",
             style=discord.ButtonStyle.danger if mods_only else discord.ButtonStyle.success,
             custom_id="codeclaimer_toggle_mods_only",
         )
-        toggle.callback = self._toggle_callback
-        self.add_item(toggle)
+        mods_toggle.callback = self._toggle_mods_callback
+        self.add_item(mods_toggle)
+
+        batch_toggle = discord.ui.Button(
+            label="One Claim Per Batch: ON" if one_claim_per_batch else "One Claim Per Batch: OFF",
+            style=discord.ButtonStyle.danger if one_claim_per_batch else discord.ButtonStyle.success,
+            custom_id="codeclaimer_toggle_one_claim_per_batch",
+        )
+        batch_toggle.callback = self._toggle_batch_callback
+        self.add_item(batch_toggle)
 
         self.add_item(discord.ui.Button(
             label="Support CodeClaimer",
@@ -608,7 +692,7 @@ class SettingsView(discord.ui.View):
             url="https://ko-fi.com/artchemylabs",
         ))
 
-    async def _toggle_callback(self, interaction: discord.Interaction):
+    async def _toggle_mods_callback(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message(
                 "Settings can only be changed inside a server.", ephemeral=True
@@ -619,8 +703,24 @@ class SettingsView(discord.ui.View):
                 "Only moderators can change CodeClaimer settings.", ephemeral=True
             )
             return
-
         set_mods_only(interaction.guild.id, not get_mods_only(interaction.guild.id))
+        await interaction.response.edit_message(
+            embed=build_settings_embed(interaction.guild.id),
+            view=SettingsView(interaction.guild.id),
+        )
+
+    async def _toggle_batch_callback(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Settings can only be changed inside a server.", ephemeral=True
+            )
+            return
+        if not is_moderator(interaction.user):
+            await interaction.response.send_message(
+                "Only moderators can change CodeClaimer settings.", ephemeral=True
+            )
+            return
+        set_one_claim_per_batch(interaction.guild.id, not get_one_claim_per_batch(interaction.guild.id))
         await interaction.response.edit_message(
             embed=build_settings_embed(interaction.guild.id),
             view=SettingsView(interaction.guild.id),
@@ -696,6 +796,9 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             f"Processing **{len(valid_entries)}** entries...", ephemeral=True
         )
 
+        # All cards in this modal submission share one batch_id
+        batch_id = str(uuid.uuid4())
+
         for item_name, platform, product_code, expires_at in valid_entries:
             await post_claim_card(
                 channel=interaction.channel,
@@ -704,6 +807,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
                 platform=platform,
                 product_code=product_code,
                 expires_at=expires_at,
+                batch_id=batch_id,
             )
             await asyncio.sleep(0.6)
 
@@ -746,7 +850,9 @@ class BulkSharePanelView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 def build_settings_embed(guild_id: int) -> discord.Embed:
-    mods_only = get_mods_only(guild_id)
+    mods_only           = get_mods_only(guild_id)
+    one_claim_per_batch = get_one_claim_per_batch(guild_id)
+
     embed = discord.Embed(
         title="CodeClaimer Settings",
         description="Manage how CodeClaimer works in this server.",
@@ -766,10 +872,16 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="Expiration",
+        name="One Claim Per Batch",
         value=(
-            "Use `MM/DD/YYYY` for expiration dates. "
-            "Unclaimed expired codes are automatically marked as expired."
+            f"**{'ON' if one_claim_per_batch else 'OFF'}**\n"
+            + (
+                "Each member can claim only one code per `/bulkshare` drop."
+                if one_claim_per_batch
+                else "Members can claim multiple codes from the same `/bulkshare` drop."
+            )
+            + "\n\nThis setting only applies to `/bulkshare`. "
+            "Single `/sharecode` drops are not affected."
         ),
         inline=False,
     )
@@ -792,8 +904,6 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Re-register all persistent views on startup.
-        # timeout=None + fixed custom_id = button works after any restart.
         self.add_view(ClaimButtonView())
         self.add_view(BulkSharePanelView())
 
@@ -837,7 +947,6 @@ async def expire_unclaimed_codes():
             await asyncio.sleep(0.4)
 
     except Exception as exc:
-        # Log but do not let the task die — it will retry on the next loop iteration
         print(f"[Expiration] Unhandled error in expiration task: {exc}")
 
 
@@ -856,7 +965,6 @@ async def on_ready():
     print(f"Logged in as {bot.user.name}")
     print(f"Database: {DB_PATH}")
 
-    # Seed settings for all current guilds without overwriting saved settings
     seed_guild_settings([g.id for g in bot.guilds])
     print(f"Guild settings seeded for {len(bot.guilds)} server(s).")
 
@@ -873,8 +981,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # Seed settings for new server — INSERT OR IGNORE preserves saved settings
-    # if the bot is re-invited after a kick
     seed_guild_settings([guild.id])
     print(f"Joined {guild.name} ({guild.id}) — settings seeded.")
 
@@ -948,6 +1054,7 @@ async def sharecode(
         platform=platform,
         product_code=code,
         expires_at=expires_at,
+        batch_id="",
     )
 
 
@@ -1025,13 +1132,18 @@ async def help_command(interaction: discord.Interaction):
             "`Product Name (Platform): Code | MM/DD/YYYY`\n\n"
             "Examples:\n"
             "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
-            "`Celeste: DEF-456`"
+            "`Celeste: DEF-456`\n\n"
+            "If **One Claim Per Batch** is ON in `/settings`, each member can only claim "
+            "one code per bulk drop. This does not apply to `/sharecode`."
         ),
         inline=False,
     )
     embed.add_field(
         name="/settings",
-        value="Toggle Mods Only on or off. Moderator = Administrator, Manage Server, or Manage Messages.",
+        value=(
+            "Toggle **Mods Only** and **One Claim Per Batch** on or off.\n"
+            "Moderator = Administrator, Manage Server, or Manage Messages."
+        ),
         inline=False,
     )
     embed.add_field(

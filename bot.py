@@ -77,8 +77,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id             INTEGER PRIMARY KEY,
                 mods_only            INTEGER NOT NULL DEFAULT 1,
-                one_claim_per_batch  INTEGER NOT NULL DEFAULT 0,
-                claim_verification   INTEGER NOT NULL DEFAULT 0
+                one_claim_per_batch  INTEGER NOT NULL DEFAULT 1,
+                claim_verification   INTEGER NOT NULL DEFAULT 1
             )
         """)
         conn.execute("""
@@ -107,8 +107,8 @@ def init_db() -> None:
 
         existing_settings = {row[1] for row in conn.execute("PRAGMA table_info(guild_settings)")}
         for col, definition in [
-            ("one_claim_per_batch", "INTEGER NOT NULL DEFAULT 0"),
-            ("claim_verification",  "INTEGER NOT NULL DEFAULT 0"),
+            ("one_claim_per_batch", "INTEGER NOT NULL DEFAULT 1"),
+            ("claim_verification",  "INTEGER NOT NULL DEFAULT 1"),
         ]:
             if col not in existing_settings:
                 conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {definition}")
@@ -139,7 +139,7 @@ def seed_guild_settings(guild_ids: list[int]) -> None:
             """
             INSERT OR IGNORE INTO guild_settings
                 (guild_id, mods_only, one_claim_per_batch, claim_verification)
-            VALUES (?, 1, 0, 0)
+            VALUES (?, 1, 1, 1)
             """,
             [(gid,) for gid in guild_ids],
         )
@@ -388,7 +388,7 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
                 """
                 INSERT OR IGNORE INTO guild_settings
                     (guild_id, mods_only, one_claim_per_batch, claim_verification)
-                VALUES (?, 1, 0, 0)
+                VALUES (?, 1, 1, 1)
                 """,
                 (guild_id,)
             )
@@ -427,7 +427,7 @@ def _update_guild_setting(guild_id: int, column: str, value: int) -> None:
             """
             INSERT OR IGNORE INTO guild_settings
                 (guild_id, mods_only, one_claim_per_batch, claim_verification)
-            VALUES (?, 1, 0, 0)
+            VALUES (?, 1, 1, 1)
             """,
             (guild_id,)
         )

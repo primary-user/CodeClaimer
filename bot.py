@@ -657,15 +657,16 @@ class MathChallengeView(discord.ui.View):
             self.answered = True
             self.stop()
 
-            # Re-check the DB row is still there (another user may have claimed it
-            # during the 30s window)
+            # Atomic delete — only one concurrent answerer wins.
+            # RETURNING gives us the row if we deleted it, None if someone else got there first.
             with get_db() as conn:
-                still_exists = conn.execute(
-                    "SELECT 1 FROM shared_codes WHERE message_id = ?",
+                won = conn.execute(
+                    "DELETE FROM shared_codes WHERE message_id = ? RETURNING message_id",
                     (self.message_id,)
                 ).fetchone()
+                conn.commit()
 
-            if not still_exists:
+            if not won:
                 try:
                     msg = await interaction.channel.fetch_message(self.message_id)
                     await msg.edit(embed=build_already_claimed_embed(), view=None)
@@ -702,6 +703,24 @@ class MathChallengeView(discord.ui.View):
             try:
                 await interaction.user.send(embed=dm_embed)
             except discord.Forbidden:
+                # DM failed — put the row back so the code is not lost
+                with get_db() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO shared_codes
+                            (message_id, product_code, item_name, platform, expires_at,
+                             guild_id, channel_id, created_at, batch_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self.message_id, self.code_to_send, self.item_to_send,
+                            self.platform_to_send, self.expires_to_send,
+                            self.guild_id, self.channel_id,
+                            datetime.now(timezone.utc).isoformat(),
+                            self.batch_id or None,
+                        )
+                    )
+                    conn.commit()
                 await interaction.response.send_message(
                     "Could not send you a DM. "
                     "Please open your Privacy Settings / DMs and try again.",
@@ -709,17 +728,9 @@ class MathChallengeView(discord.ui.View):
                 )
                 return
 
-            # Commit claim
-            with get_db() as conn:
-                conn.execute(
-                    "DELETE FROM shared_codes WHERE message_id = ?", (self.message_id,)
-                )
-                conn.commit()
-
             if self.batch_id and self.guild_id:
                 record_batch_claim(self.batch_id, interaction.user.id, self.guild_id)
 
-            # Clean up pending challenge entry
             _pending_challenges.pop((self.message_id, interaction.user.id), None)
 
             await interaction.response.send_message(
@@ -886,18 +897,54 @@ class ClaimButtonView(discord.ui.View):
             inline=False,
         )
 
+        # Atomic delete — only one caller gets a row back.
+        # If another user claimed between the SELECT above and here, we get
+        # None and turn away before sending any DM.
+        with get_db() as conn:
+            won = conn.execute(
+                "DELETE FROM shared_codes WHERE message_id = ? RETURNING message_id",
+                (msg_id,)
+            ).fetchone()
+            conn.commit()
+
+        if not won:
+            # Lost the race — someone else claimed it first
+            try:
+                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+            await interaction.response.send_message(
+                "This code was just claimed by someone else!", ephemeral=True
+            )
+            return
+
+        # We won — now send the DM
         try:
             await interaction.user.send(embed=dm_embed)
         except discord.Forbidden:
+            # DM failed — put the row back so the code is not lost
+            with get_db() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO shared_codes
+                        (message_id, product_code, item_name, platform, expires_at,
+                         guild_id, channel_id, sharer_id, sharer_name, created_at, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        msg_id, code_to_send, item_to_send, platform_to_send,
+                        expires_to_send,
+                        guild_id, channel_id, sharer_id, sharer_name_db,
+                        datetime.now(timezone.utc).isoformat(),
+                        batch_id or None,
+                    )
+                )
+                conn.commit()
             await interaction.response.send_message(
                 "Could not send you a DM. Please open your Privacy Settings / DMs and try again.",
                 ephemeral=True,
             )
             return
-
-        with get_db() as conn:
-            conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
-            conn.commit()
 
         if batch_id and guild_id:
             record_batch_claim(batch_id, interaction.user.id, guild_id)

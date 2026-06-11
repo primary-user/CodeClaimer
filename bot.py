@@ -931,7 +931,7 @@ class SettingsView(discord.ui.View):
 
         mods_toggle = discord.ui.Button(
             label="Mods Only: ON" if mods_only else "Mods Only: OFF",
-            style=discord.ButtonStyle.danger if mods_only else discord.ButtonStyle.success,
+            style=discord.ButtonStyle.success if mods_only else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_mods_only",
         )
         mods_toggle.callback = self._toggle_mods_callback
@@ -939,7 +939,7 @@ class SettingsView(discord.ui.View):
 
         batch_toggle = discord.ui.Button(
             label="One Claim Per Batch: ON" if one_claim_per_batch else "One Claim Per Batch: OFF",
-            style=discord.ButtonStyle.danger if one_claim_per_batch else discord.ButtonStyle.success,
+            style=discord.ButtonStyle.success if one_claim_per_batch else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_one_claim_per_batch",
         )
         batch_toggle.callback = self._toggle_batch_callback
@@ -947,7 +947,7 @@ class SettingsView(discord.ui.View):
 
         verify_toggle = discord.ui.Button(
             label="Claim Verification: ON" if claim_verification else "Claim Verification: OFF",
-            style=discord.ButtonStyle.danger if claim_verification else discord.ButtonStyle.success,
+            style=discord.ButtonStyle.success if claim_verification else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_claim_verification",
         )
         verify_toggle.callback = self._toggle_verify_callback

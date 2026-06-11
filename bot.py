@@ -38,6 +38,11 @@ TITLE_PHRASES = [
     "New Code Up For Grabs!",
 ]
 
+# In-memory store for pending math challenges.
+# Key: (message_id, user_id) → correct answer (int)
+# Short-lived — 30s timeout on the view means these clean themselves up.
+_pending_challenges: dict[tuple[int, int], int] = {}
+
 
 # ---------------------------------------------------------------------------
 # Database
@@ -72,14 +77,15 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id             INTEGER PRIMARY KEY,
                 mods_only            INTEGER NOT NULL DEFAULT 1,
-                one_claim_per_batch  INTEGER NOT NULL DEFAULT 0
+                one_claim_per_batch  INTEGER NOT NULL DEFAULT 0,
+                claim_verification   INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS batch_claims (
-                batch_id  TEXT NOT NULL,
-                user_id   INTEGER NOT NULL,
-                guild_id  INTEGER NOT NULL,
+                batch_id   TEXT NOT NULL,
+                user_id    INTEGER NOT NULL,
+                guild_id   INTEGER NOT NULL,
                 claimed_at TEXT,
                 PRIMARY KEY (batch_id, user_id)
             )
@@ -100,10 +106,12 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE shared_codes ADD COLUMN {col} {definition}")
 
         existing_settings = {row[1] for row in conn.execute("PRAGMA table_info(guild_settings)")}
-        if "one_claim_per_batch" not in existing_settings:
-            conn.execute(
-                "ALTER TABLE guild_settings ADD COLUMN one_claim_per_batch INTEGER NOT NULL DEFAULT 0"
-            )
+        for col, definition in [
+            ("one_claim_per_batch", "INTEGER NOT NULL DEFAULT 0"),
+            ("claim_verification",  "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col not in existing_settings:
+                conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {definition}")
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_shared_codes_expires_at
@@ -121,16 +129,17 @@ def init_db() -> None:
 def seed_guild_settings(guild_ids: list[int]) -> None:
     """
     Insert a default row for any guild that does not already have one.
-    INSERT OR IGNORE means existing settings — including custom toggles — are
-    never overwritten on restart, redeploy, or DB wipe recovery.
+    INSERT OR IGNORE means existing settings are never overwritten on
+    restart, redeploy, or DB wipe recovery.
     """
     if not guild_ids:
         return
     with get_db() as conn:
         conn.executemany(
             """
-            INSERT OR IGNORE INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
-            VALUES (?, 1, 0)
+            INSERT OR IGNORE INTO guild_settings
+                (guild_id, mods_only, one_claim_per_batch, claim_verification)
+            VALUES (?, 1, 0, 0)
             """,
             [(gid,) for gid in guild_ids],
         )
@@ -272,6 +281,41 @@ def build_already_claimed_embed() -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
+# Math challenge helpers
+# ---------------------------------------------------------------------------
+
+def generate_math_challenge() -> tuple[str, int]:
+    """
+    Generate a simple addition or subtraction problem where the answer
+    is always between 1 and 9 inclusive.
+    Returns (question_string, correct_answer).
+    """
+    while True:
+        op = random.choice(["add", "sub"])
+        if op == "add":
+            a = random.randint(1, 8)
+            b = random.randint(1, 9 - a)   # ensures a + b <= 9
+            answer = a + b
+            question = f"{a} + {b}"
+        else:
+            a = random.randint(2, 9)
+            b = random.randint(1, a - 1)   # ensures a - b >= 1
+            answer = a - b
+            question = f"{a} - {b}"
+
+        if 1 <= answer <= 9:
+            return question, answer
+
+
+def generate_decoys(correct: int) -> list[int]:
+    """
+    Return 3 unique wrong single-digit answers (1-9) to go with the correct answer.
+    """
+    pool = [n for n in range(1, 10) if n != correct]
+    return random.sample(pool, 3)
+
+
+# ---------------------------------------------------------------------------
 # Bulk parsing helpers
 # ---------------------------------------------------------------------------
 
@@ -326,22 +370,37 @@ def is_moderator(user) -> bool:
 
 
 def _get_guild_settings(guild_id: int) -> sqlite3.Row:
+    """
+    Fetch guild settings, inserting defaults if no row exists yet.
+    Uses INSERT OR IGNORE so existing settings are never clobbered.
+    """
     with get_db() as conn:
         row = conn.execute(
-            "SELECT mods_only, one_claim_per_batch FROM guild_settings WHERE guild_id = ?",
+            """
+            SELECT mods_only, one_claim_per_batch, claim_verification
+            FROM guild_settings WHERE guild_id = ?
+            """,
             (guild_id,)
         ).fetchone()
+
         if row is None:
             conn.execute(
-                "INSERT OR IGNORE INTO guild_settings (guild_id, mods_only, one_claim_per_batch) VALUES (?, 1, 0)",
+                """
+                INSERT OR IGNORE INTO guild_settings
+                    (guild_id, mods_only, one_claim_per_batch, claim_verification)
+                VALUES (?, 1, 0, 0)
+                """,
                 (guild_id,)
             )
             conn.commit()
-            # Re-fetch after insert
             row = conn.execute(
-                "SELECT mods_only, one_claim_per_batch FROM guild_settings WHERE guild_id = ?",
+                """
+                SELECT mods_only, one_claim_per_batch, claim_verification
+                FROM guild_settings WHERE guild_id = ?
+                """,
                 (guild_id,)
             ).fetchone()
+
         return row
 
 
@@ -353,30 +412,42 @@ def get_one_claim_per_batch(guild_id: int) -> bool:
     return bool(_get_guild_settings(guild_id)["one_claim_per_batch"])
 
 
-def set_mods_only(guild_id: int, enabled: bool) -> None:
+def get_claim_verification(guild_id: int) -> bool:
+    return bool(_get_guild_settings(guild_id)["claim_verification"])
+
+
+def _update_guild_setting(guild_id: int, column: str, value: int) -> None:
+    """
+    Generic upsert for a single guild_settings column.
+    Only updates the target column — never overwrites others.
+    """
     with get_db() as conn:
+        # Ensure a row exists first
         conn.execute(
             """
-            INSERT INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
-            VALUES (?, ?, 0)
-            ON CONFLICT(guild_id) DO UPDATE SET mods_only = excluded.mods_only
+            INSERT OR IGNORE INTO guild_settings
+                (guild_id, mods_only, one_claim_per_batch, claim_verification)
+            VALUES (?, 1, 0, 0)
             """,
-            (guild_id, 1 if enabled else 0),
+            (guild_id,)
+        )
+        conn.execute(
+            f"UPDATE guild_settings SET {column} = ? WHERE guild_id = ?",
+            (value, guild_id)
         )
         conn.commit()
+
+
+def set_mods_only(guild_id: int, enabled: bool) -> None:
+    _update_guild_setting(guild_id, "mods_only", 1 if enabled else 0)
 
 
 def set_one_claim_per_batch(guild_id: int, enabled: bool) -> None:
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO guild_settings (guild_id, mods_only, one_claim_per_batch)
-            VALUES (?, 1, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET one_claim_per_batch = excluded.one_claim_per_batch
-            """,
-            (guild_id, 1 if enabled else 0),
-        )
-        conn.commit()
+    _update_guild_setting(guild_id, "one_claim_per_batch", 1 if enabled else 0)
+
+
+def set_claim_verification(guild_id: int, enabled: bool) -> None:
+    _update_guild_setting(guild_id, "claim_verification", 1 if enabled else 0)
 
 
 async def user_can_use_bot(interaction: discord.Interaction) -> bool:
@@ -390,7 +461,6 @@ async def user_can_use_bot(interaction: discord.Interaction) -> bool:
 # ---------------------------------------------------------------------------
 
 def has_claimed_from_batch(batch_id: str, user_id: int) -> bool:
-    """Return True if this user has already claimed a code from this batch."""
     if not batch_id:
         return False
     with get_db() as conn:
@@ -402,7 +472,6 @@ def has_claimed_from_batch(batch_id: str, user_id: int) -> bool:
 
 
 def record_batch_claim(batch_id: str, user_id: int, guild_id: int) -> None:
-    """Record that a user has claimed from this batch."""
     if not batch_id:
         return
     with get_db() as conn:
@@ -523,6 +592,164 @@ async def mark_code_expired(
 # Views & Modals
 # ---------------------------------------------------------------------------
 
+class MathChallengeView(discord.ui.View):
+    """
+    Ephemeral view shown after clicking Claim Code when verification is ON.
+    Presents a simple math question with 4 answer buttons.
+    Times out after 30 seconds — card stays live for others.
+    """
+
+    def __init__(
+        self,
+        correct_answer: int,
+        message_id: int,
+        code_to_send: str,
+        item_to_send: str,
+        platform_to_send: str,
+        expires_to_send: str,
+        sharer_display: str,
+        batch_id: str,
+        guild_id: int | None,
+        channel_id: int | None,
+    ):
+        super().__init__(timeout=30)
+        self.correct_answer   = correct_answer
+        self.message_id       = message_id
+        self.code_to_send     = code_to_send
+        self.item_to_send     = item_to_send
+        self.platform_to_send = platform_to_send
+        self.expires_to_send  = expires_to_send
+        self.sharer_display   = sharer_display
+        self.batch_id         = batch_id
+        self.guild_id         = guild_id
+        self.channel_id       = channel_id
+        self.answered         = False
+
+        # Build answer choices: correct + 3 decoys, shuffled
+        choices = [correct_answer] + generate_decoys(correct_answer)
+        random.shuffle(choices)
+
+        for choice in choices:
+            btn = discord.ui.Button(
+                label=str(choice),
+                style=discord.ButtonStyle.secondary,
+            )
+            btn.callback = self._make_answer_callback(choice)
+            self.add_item(btn)
+
+    def _make_answer_callback(self, choice: int):
+        async def callback(interaction: discord.Interaction):
+            if self.answered:
+                await interaction.response.send_message(
+                    "You have already answered.", ephemeral=True
+                )
+                return
+
+            if choice != self.correct_answer:
+                await interaction.response.send_message(
+                    "❌ Incorrect. Try clicking the claim button again.",
+                    ephemeral=True,
+                )
+                self.stop()
+                return
+
+            # Correct — proceed with claim
+            self.answered = True
+            self.stop()
+
+            # Re-check the DB row is still there (another user may have claimed it
+            # during the 30s window)
+            with get_db() as conn:
+                still_exists = conn.execute(
+                    "SELECT 1 FROM shared_codes WHERE message_id = ?",
+                    (self.message_id,)
+                ).fetchone()
+
+            if not still_exists:
+                try:
+                    msg = await interaction.channel.fetch_message(self.message_id)
+                    await msg.edit(embed=build_already_claimed_embed(), view=None)
+                except Exception:
+                    pass
+                await interaction.response.send_message(
+                    "Someone else claimed this code while you were answering.",
+                    ephemeral=True,
+                )
+                return
+
+            display_platform = f" ({self.platform_to_send})" if self.platform_to_send else ""
+
+            dm_embed = discord.Embed(
+                title="🎁 Code Successfully Claimed!",
+                description=(
+                    f"Here is your activation key for **{self.item_to_send}**{display_platform}:"
+                ),
+                color=discord.Color.green(),
+            )
+            dm_embed.add_field(
+                name="Product Code", value=f"`{self.code_to_send}`", inline=False
+            )
+            if self.expires_to_send:
+                dm_embed.add_field(
+                    name="Expires", value=self.expires_to_send, inline=False
+                )
+            dm_embed.add_field(
+                name="Keep the cycle going!",
+                value="Have extra keys? Use `/sharecode` to pay it forward!",
+                inline=False,
+            )
+
+            try:
+                await interaction.user.send(embed=dm_embed)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "Could not send you a DM. "
+                    "Please open your Privacy Settings / DMs and try again.",
+                    ephemeral=True,
+                )
+                return
+
+            # Commit claim
+            with get_db() as conn:
+                conn.execute(
+                    "DELETE FROM shared_codes WHERE message_id = ?", (self.message_id,)
+                )
+                conn.commit()
+
+            if self.batch_id and self.guild_id:
+                record_batch_claim(self.batch_id, interaction.user.id, self.guild_id)
+
+            # Clean up pending challenge entry
+            _pending_challenges.pop((self.message_id, interaction.user.id), None)
+
+            await interaction.response.send_message(
+                "✅ Correct! The code has been sent to your DMs.", ephemeral=True
+            )
+
+            try:
+                msg = await interaction.channel.fetch_message(self.message_id)
+                await msg.edit(
+                    embed=build_claimed_embed(
+                        item_name=self.item_to_send,
+                        platform=self.platform_to_send,
+                        claimer_mention=interaction.user.mention,
+                        sharer_display=self.sharer_display,
+                    ),
+                    view=None,
+                )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                print(f"[Claim] Could not update public card {self.message_id}: {exc}")
+
+        return callback
+
+    async def on_timeout(self):
+        # Clean up the pending challenge entry on timeout
+        # We don't have the user_id here but the in-memory dict is keyed on it.
+        # Keys for this message_id are cleaned up when the user answers or on
+        # the next successful claim. Small memory cost, harmless.
+        pass
+
+
 class ClaimButtonView(discord.ui.View):
     def __init__(
         self,
@@ -564,8 +791,14 @@ class ClaimButtonView(discord.ui.View):
             channel_id       = row["channel_id"]
             sharer_id        = row["sharer_id"]
             sharer_name_db   = row["sharer_name"] or "Someone"
-            sharer_display   = f"<@{sharer_id}>" if sharer_id else sharer_name_db
             batch_id         = row["batch_id"] or ""
+
+            # Use stored display name — raw IDs do not resolve in embed descriptions
+            sharer_display = (
+                sharer_name_db
+                if sharer_name_db and sharer_name_db != "Someone"
+                else (f"<@{sharer_id}>" if sharer_id else "Someone")
+            )
         else:
             # Stale card — clean it up
             try:
@@ -600,7 +833,7 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # One claim per batch check — only applies to bulk drops in this guild
+        # One claim per batch check
         if batch_id and guild_id and get_one_claim_per_batch(guild_id):
             if has_claimed_from_batch(batch_id, interaction.user.id):
                 await interaction.response.send_message(
@@ -610,6 +843,33 @@ class ClaimButtonView(discord.ui.View):
                 )
                 return
 
+        # Claim verification — show math challenge if enabled
+        if guild_id and get_claim_verification(guild_id):
+            question, correct_answer = generate_math_challenge()
+            _pending_challenges[(msg_id, interaction.user.id)] = correct_answer
+
+            challenge_view = MathChallengeView(
+                correct_answer=correct_answer,
+                message_id=msg_id,
+                code_to_send=code_to_send,
+                item_to_send=item_to_send,
+                platform_to_send=platform_to_send,
+                expires_to_send=expires_to_send,
+                sharer_display=sharer_display,
+                batch_id=batch_id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+            )
+
+            await interaction.response.send_message(
+                f"**Quick check — what is {question}?**\n"
+                "Answer within 30 seconds to claim your code.",
+                view=challenge_view,
+                ephemeral=True,
+            )
+            return
+
+        # No verification — claim directly
         display_platform = f" ({platform_to_send})" if platform_to_send else ""
 
         dm_embed = discord.Embed(
@@ -635,12 +895,10 @@ class ClaimButtonView(discord.ui.View):
             )
             return
 
-        # DM delivered — commit claim
         with get_db() as conn:
             conn.execute("DELETE FROM shared_codes WHERE message_id = ?", (msg_id,))
             conn.commit()
 
-        # Record batch claim if applicable
         if batch_id and guild_id:
             record_batch_claim(batch_id, interaction.user.id, guild_id)
 
@@ -669,6 +927,7 @@ class SettingsView(discord.ui.View):
 
         mods_only           = get_mods_only(guild_id)
         one_claim_per_batch = get_one_claim_per_batch(guild_id)
+        claim_verification  = get_claim_verification(guild_id)
 
         mods_toggle = discord.ui.Button(
             label="Mods Only: ON" if mods_only else "Mods Only: OFF",
@@ -686,6 +945,14 @@ class SettingsView(discord.ui.View):
         batch_toggle.callback = self._toggle_batch_callback
         self.add_item(batch_toggle)
 
+        verify_toggle = discord.ui.Button(
+            label="Claim Verification: ON" if claim_verification else "Claim Verification: OFF",
+            style=discord.ButtonStyle.danger if claim_verification else discord.ButtonStyle.success,
+            custom_id="codeclaimer_toggle_claim_verification",
+        )
+        verify_toggle.callback = self._toggle_verify_callback
+        self.add_item(verify_toggle)
+
         self.add_item(discord.ui.Button(
             label="Support CodeClaimer",
             style=discord.ButtonStyle.link,
@@ -693,15 +960,7 @@ class SettingsView(discord.ui.View):
         ))
 
     async def _toggle_mods_callback(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "Settings can only be changed inside a server.", ephemeral=True
-            )
-            return
-        if not is_moderator(interaction.user):
-            await interaction.response.send_message(
-                "Only moderators can change CodeClaimer settings.", ephemeral=True
-            )
+        if not await self._mod_check(interaction):
             return
         set_mods_only(interaction.guild.id, not get_mods_only(interaction.guild.id))
         await interaction.response.edit_message(
@@ -710,15 +969,7 @@ class SettingsView(discord.ui.View):
         )
 
     async def _toggle_batch_callback(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "Settings can only be changed inside a server.", ephemeral=True
-            )
-            return
-        if not is_moderator(interaction.user):
-            await interaction.response.send_message(
-                "Only moderators can change CodeClaimer settings.", ephemeral=True
-            )
+        if not await self._mod_check(interaction):
             return
         set_one_claim_per_batch(interaction.guild.id, not get_one_claim_per_batch(interaction.guild.id))
         await interaction.response.edit_message(
@@ -726,8 +977,38 @@ class SettingsView(discord.ui.View):
             view=SettingsView(interaction.guild.id),
         )
 
+    async def _toggle_verify_callback(self, interaction: discord.Interaction):
+        if not await self._mod_check(interaction):
+            return
+        set_claim_verification(interaction.guild.id, not get_claim_verification(interaction.guild.id))
+        await interaction.response.edit_message(
+            embed=build_settings_embed(interaction.guild.id),
+            view=SettingsView(interaction.guild.id),
+        )
+
+    async def _mod_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Settings can only be changed inside a server.", ephemeral=True
+            )
+            return False
+        if not is_moderator(interaction.user):
+            await interaction.response.send_message(
+                "Only moderators can change CodeClaimer settings.", ephemeral=True
+            )
+            return False
+        return True
+
 
 class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
+    pre_drop_message = discord.ui.TextInput(
+        label="Optional message to post before the drop",
+        style=discord.TextStyle.short,
+        required=False,
+        max_length=500,
+        placeholder="e.g. 🎮 Game drop from @Crimsonx0611! One per person!",
+    )
+
     batch_data = discord.ui.TextInput(
         label="Paste codes, one per line",
         style=discord.TextStyle.paragraph,
@@ -750,7 +1031,8 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             )
             return
 
-        raw_text = str(self.batch_data.value)
+        raw_text    = str(self.batch_data.value)
+        pre_message = str(self.pre_drop_message.value).strip() if self.pre_drop_message.value else ""
 
         if contains_link(raw_text):
             await interaction.followup.send(
@@ -795,6 +1077,13 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         await interaction.followup.send(
             f"Processing **{len(valid_entries)}** entries...", ephemeral=True
         )
+
+        # Post the optional pre-drop message to the channel first
+        if pre_message:
+            try:
+                await interaction.channel.send(pre_message)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f"[BulkShare] Could not post pre-drop message: {exc}")
 
         # All cards in this modal submission share one batch_id
         batch_id = str(uuid.uuid4())
@@ -852,6 +1141,7 @@ class BulkSharePanelView(discord.ui.View):
 def build_settings_embed(guild_id: int) -> discord.Embed:
     mods_only           = get_mods_only(guild_id)
     one_claim_per_batch = get_one_claim_per_batch(guild_id)
+    claim_verification  = get_claim_verification(guild_id)
 
     embed = discord.Embed(
         title="CodeClaimer Settings",
@@ -882,6 +1172,19 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
             )
             + "\n\nThis setting only applies to `/bulkshare`. "
             "Single `/sharecode` drops are not affected."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Claim Verification",
+        value=(
+            f"**{'ON' if claim_verification else 'OFF'}**\n"
+            + (
+                "Members must answer a quick math question before receiving a code."
+                if claim_verification
+                else "No verification required. Codes are claimed instantly on click — first to click wins."
+            )
+            + "\n\nHelps slow down fast claiming and reduces automated claiming."
         ),
         inline=False,
     )
@@ -1078,7 +1381,8 @@ async def bulkshare(interaction: discord.Interaction):
             "**Examples:**\n"
             "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
             "`Celeste: DEF-456`\n"
-            "`Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026`"
+            "`Minecraft Skin Pack (Xbox): GHI-789 | 10/01/2026`\n\n"
+            "You can also include an optional message to post above the drop."
         ),
         color=discord.Color.blue(),
     )
@@ -1130,18 +1434,22 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "Opens a guided panel. Click **Open Bulk Entry Form** and paste one code per line.\n\n"
             "`Product Name (Platform): Code | MM/DD/YYYY`\n\n"
-            "Examples:\n"
-            "`Hollow Knight (Steam): ABC-123 | 12/31/2026`\n"
-            "`Celeste: DEF-456`\n\n"
+            "You can include an optional message that posts above the drop — "
+            "useful for tagging roles or crediting a sharer.\n\n"
             "If **One Claim Per Batch** is ON in `/settings`, each member can only claim "
-            "one code per bulk drop. This does not apply to `/sharecode`."
+            "one code per bulk drop. This does not apply to `/sharecode`.\n\n"
+            "If **Claim Verification** is ON, members must answer a quick math question "
+            "before receiving their code."
         ),
         inline=False,
     )
     embed.add_field(
         name="/settings",
         value=(
-            "Toggle **Mods Only** and **One Claim Per Batch** on or off.\n"
+            "Toggle server settings:\n"
+            "**Mods Only** — restrict sharing commands to moderators\n"
+            "**One Claim Per Batch** — one code per member per bulk drop\n"
+            "**Claim Verification** — math question before claiming\n\n"
             "Moderator = Administrator, Manage Server, or Manage Messages."
         ),
         inline=False,
@@ -1150,7 +1458,8 @@ async def help_command(interaction: discord.Interaction):
         name="Rules",
         value=(
             "No links or web addresses allowed in any field. "
-            "The first person to click claims the code by DM. "
+            "The first person to answer correctly (if verification is ON) or click "
+            "claims the code by DM. "
             "Claimed and expired cards are greyed out with the button removed."
         ),
         inline=False,

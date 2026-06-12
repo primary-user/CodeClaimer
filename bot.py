@@ -255,14 +255,14 @@ def build_expired_embed(item_name: str, platform: str, expires_at: str) -> disco
 def build_claimed_embed(
     item_name: str,
     platform: str,
-    claimer_mention: str,
+    claimer_display: str,
     sharer_display: str,
 ) -> discord.Embed:
     suffix = f" ({clean_platform(platform)})" if clean_platform(platform) else ""
     return discord.Embed(
         title="Loot Claimed!",
         description=(
-            f"The code for **{item_name}**{suffix} has been claimed by {claimer_mention}!\n\n"
+            f"The code for **{item_name}**{suffix} has been claimed by **{claimer_display}**!\n\n"
             f"Thank you to {sharer_display} for sharing with the community!"
         ),
         color=discord.Color.dark_grey(),
@@ -743,7 +743,7 @@ class MathChallengeView(discord.ui.View):
                     embed=build_claimed_embed(
                         item_name=self.item_to_send,
                         platform=self.platform_to_send,
-                        claimer_mention=interaction.user.mention,
+                        claimer_display=interaction.user.display_name,
                         sharer_display=self.sharer_display,
                     ),
                     view=None,
@@ -958,7 +958,7 @@ class ClaimButtonView(discord.ui.View):
                 embed=build_claimed_embed(
                     item_name=item_to_send,
                     platform=platform_to_send,
-                    claimer_mention=interaction.user.mention,
+                    claimer_display=interaction.user.display_name,
                     sharer_display=sharer_display,
                 ),
                 view=None,
@@ -1303,6 +1303,30 @@ async def before_expire():
     await bot.wait_until_ready()
 
 
+TOPGG_TOKEN = os.getenv("TOPGG_TOKEN")
+
+@tasks.loop(minutes=30)
+async def post_topgg_stats():
+    if not TOPGG_TOKEN:
+        return
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                f"https://top.gg/api/bots/{bot.user.id}/stats",
+                json={"server_count": len(bot.guilds)},
+                headers={"Authorization": TOPGG_TOKEN},
+            )
+        print(f"[Top.gg] Posted server count: {len(bot.guilds)}")
+    except Exception as exc:
+        print(f"[Top.gg] Failed to post stats: {exc}")
+
+
+@post_topgg_stats.before_loop
+async def before_topgg():
+    await bot.wait_until_ready()
+
+
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
@@ -1319,6 +1343,10 @@ async def on_ready():
     if not expire_unclaimed_codes.is_running():
         expire_unclaimed_codes.start()
         print("Expiration checker started.")
+
+    if TOPGG_TOKEN and not post_topgg_stats.is_running():
+        post_topgg_stats.start()
+        print("Top.gg stats poster started.")
 
     try:
         await bot.tree.sync()

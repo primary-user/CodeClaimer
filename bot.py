@@ -696,7 +696,7 @@ class MathChallengeView(discord.ui.View):
                 )
             dm_embed.add_field(
                 name="Keep the cycle going!",
-                value="Have extra keys? Use `/sharecode` to pay it forward!",
+                value="Want secure code drops in your own community?\n[Vote or add on Top.gg](https://top.gg/bot/1511758084194832495)",
                 inline=False,
             )
 
@@ -893,7 +893,7 @@ class ClaimButtonView(discord.ui.View):
             dm_embed.add_field(name="Expires", value=expires_to_send, inline=False)
         dm_embed.add_field(
             name="Keep the cycle going!",
-            value="Have extra keys? Use `/sharecode` to pay it forward!",
+            value="Want secure code drops in your own community?\n[Vote or add on Top.gg](https://top.gg/bot/1511758084194832495)",
             inline=False,
         )
 
@@ -999,12 +999,6 @@ class SettingsView(discord.ui.View):
         )
         verify_toggle.callback = self._toggle_verify_callback
         self.add_item(verify_toggle)
-
-        self.add_item(discord.ui.Button(
-            label="Support CodeClaimer",
-            style=discord.ButtonStyle.link,
-            url="https://ko-fi.com/artchemylabs",
-        ))
 
     async def _toggle_mods_callback(self, interaction: discord.Interaction):
         if not await self._mod_check(interaction):
@@ -1237,7 +1231,11 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
     )
     embed.add_field(
         name="Support",
-        value="Use the button below to support CodeClaimer.",
+        value=(
+            "[Vote on Top.gg](https://top.gg/bot/1511758084194832495)"
+            " | "
+            "[Send some Ko-fi](https://ko-fi.com/artchemylabs)"
+        ),
         inline=False,
     )
     return embed

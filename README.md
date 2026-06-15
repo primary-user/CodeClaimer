@@ -16,13 +16,14 @@ Instead of posting codes in public chat, members submit them through slash comma
 - First-come, first-served DM delivery
 - Claimed and expired cards are greyed out with the button removed
 - Stale cards self-clean on next click
-- **Claim Verification** — optional math challenge before claiming to slow fast claims and deter bots
+- **Claim Verification** — optional challenge before claiming to slow fast claims and deter bots
+- **Six challenge modes** — Easy, Medium, Hard, Difficulty Over Time, Periodic Table, and Random
 - **One Claim Per Batch** — optionally limit members to one claim per `/bulkshare` drop
 - Persistent SQLite database with WAL mode
 - Persistent claim buttons across restarts and redeploys
 - Per-server settings that survive bot restarts and DB wipes
 - Anti-phishing link filter on all input fields
-- `/settings` with Mods Only, One Claim Per Batch, and Claim Verification toggles
+- `/settings` with Mods Only, One Claim Per Batch, Claim Verification toggles, and a challenge mode dropdown
 - Settings buttons are green when ON, red when OFF
 - Mods Only is ON by default, all other settings are OFF by default
 
@@ -89,11 +90,26 @@ Moderator = Administrator, Manage Server, or Manage Messages.
 |---|---|---|
 | Mods Only | ON | Restricts `/sharecode` and `/bulkshare` to moderators |
 | One Claim Per Batch | OFF | Limits each member to one claim per `/bulkshare` drop |
-| Claim Verification | OFF | Requires members to answer a math question before claiming |
+| Claim Verification | OFF | Requires members to solve a challenge before claiming |
 
-All buttons are **green when ON** and **red when OFF**.
+**Challenge Mode** is selected via dropdown below the toggle buttons. Default is **Easy**.
 
-Settings are stored per server and persist across bot restarts, redeploys, and database wipes. `INSERT OR IGNORE` ensures existing settings are never overwritten.
+| Mode | Description |
+|---|---|
+| Easy | Simple addition or subtraction — answer is 1–9 |
+| Medium | PEMDAS expression — integer answer under 100 |
+| Hard | Algebraic equation — solve for x |
+| Difficulty Over Time | Starts at Hard, descends to Easy as time passes (75% dropoff per tier) |
+| Periodic Table | Identify the chemical symbol for a named element |
+| Random | Bot picks a mode randomly on each claim |
+
+When **Difficulty Over Time** is selected, a **DOT Start Time** button appears. Click it to set the starting duration for the Hard tier (default 60s). Each subsequent tier is 75% of the previous:
+
+```
+60s (Hard) → 45s (Hard-Medium) → 33s (Medium) → 25s (Medium-Easy) → Easy (holds)
+```
+
+All settings persist across bot restarts, redeploys, and database wipes.
 
 ---
 
@@ -113,20 +129,48 @@ Shows private usage instructions. Ephemeral.
 6. The card is marked as claimed, the button is removed, and the DB row is deleted
 
 **If Claim Verification is ON:**
-- Clicking the button shows an ephemeral math question with 4 answer buttons
-- The user has 30 seconds to answer
-- Multiple users can have challenges open simultaneously — each gets their own random problem
+- Clicking the button shows an ephemeral challenge with 4 answer buttons
+- The user has 60 seconds to answer
+- Multiple users can have challenges open simultaneously — each gets their own problem
 - The first person to answer correctly and complete the flow gets the code
-- If someone else claims during the 30s window, the late answerer gets a "already claimed" message
+- If someone else claims during the window, the late answerer gets an "already claimed" message
 - Wrong answers or timeouts leave the card live for others
 
 **If One Claim Per Batch is ON:**
 - A user who has already claimed from a bulk drop cannot claim another card from the same batch
-- The batch check runs before the math challenge is shown
+- The batch check runs before the challenge is shown
 
-If a code expires before being claimed, a background task (runs every 10 minutes) marks the card as expired. Clicking an expired card handles it immediately.
+---
 
-If a card has no matching DB row, the next click greys it out automatically.
+## Challenge Modes
+
+### Easy
+Simple addition or subtraction. Answer is always a single digit (1–9). Four answer buttons, one correct.
+
+### Medium
+PEMDAS expression requiring order-of-operations. Answer is a positive integer under 100. Examples: `3 + 4 × 5`, `(2 + 3) × 4`, `6 × 7 − 8 × 3`. Four answer buttons with plausible decoys.
+
+### Hard
+Algebraic equation — solve for x. Forms include `ax + b = c`, `ax − b = c`, `x ÷ a + b = c`, and `ax + bx = c`. Answer is always a positive integer. Four answer buttons.
+
+### Difficulty Over Time
+Challenges start at Hard and descend through five tiers as time passes since the drop was posted:
+
+| Tier | Type | Default Duration |
+|---|---|---|
+| Hard | Algebraic | 60s |
+| Hard-Medium | Nested PEMDAS | 45s |
+| Medium | PEMDAS | ~33s |
+| Medium-Easy | Single op, answer 10–49 | ~25s |
+| Easy | Addition/subtraction | Holds indefinitely |
+
+Claimers who act fast face harder questions. The difficulty when someone clicks is determined by how much time has elapsed since the drop was posted. The current tier is shown in the challenge prompt. Starting duration is configurable via `/settings`.
+
+### Periodic Table
+"Which symbol represents the element [Name]?" — 4 chemical symbols as choices, one correct. Draws from a dataset of 40 common elements.
+
+### Random
+The bot picks one of the above modes randomly on each individual claim.
 
 ---
 
@@ -140,19 +184,6 @@ Optional. Supported formats:
 ```
 
 Date-only values expire at the end of that day in UTC. `YYYY-MM-DD` is also accepted for backward compatibility.
-
----
-
-## Claim Verification
-
-When enabled, clicking **Claim Code 🎁** shows a private math challenge instead of immediately sending the code.
-
-- Simple addition or subtraction — answer is always a single digit (1–9)
-- 4 answer buttons with one correct answer and three decoys, randomly shuffled
-- 30 second timeout — card stays live for others if unanswered
-- Each user gets their own independent random problem
-- The DB row is re-checked after a correct answer to handle simultaneous claims
-- Designed to slow fast claiming and add friction against automated scripts
 
 ---
 
@@ -193,7 +224,7 @@ SQLite with WAL journal mode. Three tables.
 | `channel_id` | Channel ID |
 | `sharer_id` | User ID of the sharer |
 | `sharer_name` | Display name of the sharer at time of posting |
-| `created_at` | UTC timestamp |
+| `created_at` | UTC timestamp — used by Difficulty Over Time to calculate elapsed time |
 | `batch_id` | UUID linking cards from the same `/bulkshare` submission |
 
 ### `guild_settings`
@@ -204,6 +235,8 @@ SQLite with WAL journal mode. Three tables.
 | `mods_only` | `1` = ON, `0` = OFF |
 | `one_claim_per_batch` | `1` = ON, `0` = OFF |
 | `claim_verification` | `1` = ON, `0` = OFF |
+| `verification_mode` | Active challenge mode (e.g. `easy`, `hard`, `difficulty_over_time`) |
+| `dot_start_seconds` | Starting duration in seconds for the Hard tier in Difficulty Over Time |
 
 ### `batch_claims`
 
@@ -293,6 +326,7 @@ Message Content Intent
 
 ```text
 discord.py
+aiohttp
 ```
 
 Standard library: `os`, `re`, `random`, `asyncio`, `sqlite3`, `uuid`, `datetime`
@@ -329,4 +363,4 @@ MIT. Inspect, modify, self-host, and contribute freely.
 
 ## Support
 
-[ko-fi.com/artchemylabs](https://ko-fi.com/artchemylabs)
+[Join the support server](https://discord.gg/NSt5Rcm8VN) | [ko-fi.com/artchemylabs](https://ko-fi.com/artchemylabs)

@@ -39,9 +39,44 @@ TITLE_PHRASES = [
 ]
 
 # In-memory store for pending math challenges.
-# Key: (message_id, user_id) → correct answer (int)
-# Short-lived — 30s timeout on the view means these clean themselves up.
-_pending_challenges: dict[tuple[int, int], int] = {}
+# Key: (message_id, user_id) → correct answer (str)
+# Short-lived — 60s timeout on the view means these clean themselves up.
+_pending_challenges: dict[tuple[int, int], str] = {}
+
+# ---------------------------------------------------------------------------
+# Verification mode registry
+# ---------------------------------------------------------------------------
+
+VERIFICATION_MODES: dict[str, str] = {
+    "easy":                 "Easy",
+    "medium":               "Medium",
+    "hard":                 "Hard",
+    "difficulty_over_time": "Difficulty Over Time",
+    "periodic":             "Periodic Table",
+    "random":               "Random",
+}
+
+# Periodic table dataset — (symbol, element name)
+PERIODIC_TABLE: list[tuple[str, str]] = [
+    ("H",  "Hydrogen"),   ("He", "Helium"),     ("Li", "Lithium"),
+    ("Be", "Beryllium"),  ("B",  "Boron"),       ("C",  "Carbon"),
+    ("N",  "Nitrogen"),   ("O",  "Oxygen"),      ("F",  "Fluorine"),
+    ("Ne", "Neon"),       ("Na", "Sodium"),      ("Mg", "Magnesium"),
+    ("Al", "Aluminum"),   ("Si", "Silicon"),     ("P",  "Phosphorus"),
+    ("S",  "Sulfur"),     ("Cl", "Chlorine"),    ("Ar", "Argon"),
+    ("K",  "Potassium"),  ("Ca", "Calcium"),     ("Fe", "Iron"),
+    ("Cu", "Copper"),     ("Zn", "Zinc"),        ("Ag", "Silver"),
+    ("Au", "Gold"),       ("Hg", "Mercury"),     ("Pb", "Lead"),
+    ("Sn", "Tin"),        ("Mn", "Manganese"),   ("Ni", "Nickel"),
+    ("Co", "Cobalt"),     ("Cr", "Chromium"),    ("Ti", "Titanium"),
+    ("Br", "Bromine"),    ("I",  "Iodine"),      ("Ba", "Barium"),
+    ("Pt", "Platinum"),   ("W",  "Tungsten"),    ("Xe", "Xenon"),
+    ("Ra", "Radium"),
+]
+
+# Difficulty Over Time configuration
+DOT_TIERS    = ["hard", "hard_medium", "medium", "medium_easy", "easy"]
+DOT_DROPOFF  = 0.75   # Each tier is 75% of the previous duration
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +113,9 @@ def init_db() -> None:
                 guild_id             INTEGER PRIMARY KEY,
                 mods_only            INTEGER NOT NULL DEFAULT 1,
                 one_claim_per_batch  INTEGER NOT NULL DEFAULT 1,
-                claim_verification   INTEGER NOT NULL DEFAULT 1
+                claim_verification   INTEGER NOT NULL DEFAULT 1,
+                verification_mode    TEXT    NOT NULL DEFAULT 'easy',
+                dot_start_seconds    INTEGER NOT NULL DEFAULT 60
             )
         """)
         conn.execute("""
@@ -109,6 +146,8 @@ def init_db() -> None:
         for col, definition in [
             ("one_claim_per_batch", "INTEGER NOT NULL DEFAULT 1"),
             ("claim_verification",  "INTEGER NOT NULL DEFAULT 1"),
+            ("verification_mode",   "TEXT NOT NULL DEFAULT 'easy'"),
+            ("dot_start_seconds",   "INTEGER NOT NULL DEFAULT 60"),
         ]:
             if col not in existing_settings:
                 conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {definition}")
@@ -138,8 +177,9 @@ def seed_guild_settings(guild_ids: list[int]) -> None:
         conn.executemany(
             """
             INSERT OR IGNORE INTO guild_settings
-                (guild_id, mods_only, one_claim_per_batch, claim_verification)
-            VALUES (?, 1, 1, 1)
+                (guild_id, mods_only, one_claim_per_batch, claim_verification,
+                 verification_mode, dot_start_seconds)
+            VALUES (?, 1, 1, 1, 'easy', 60)
             """,
             [(gid,) for gid in guild_ids],
         )
@@ -281,38 +321,239 @@ def build_already_claimed_embed() -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
-# Math challenge helpers
+# Challenge generators
 # ---------------------------------------------------------------------------
 
-def generate_math_challenge() -> tuple[str, int]:
-    """
-    Generate a simple addition or subtraction problem where the answer
-    is always between 1 and 9 inclusive.
-    Returns (question_string, correct_answer).
-    """
+def _numeric_decoys(correct: int, lo: int, hi: int, count: int = 3) -> list[int]:
+    """Generate plausible wrong answers near correct within [lo, hi]."""
+    pool: set[int] = set()
+    offsets = [o for o in range(-20, 21) if o != 0]
+    random.shuffle(offsets)
+    for o in offsets:
+        d = correct + o
+        if lo <= d <= hi and d != correct:
+            pool.add(d)
+        if len(pool) >= count:
+            break
+    while len(pool) < count:
+        d = random.randint(lo, hi)
+        if d != correct:
+            pool.add(d)
+    return list(pool)[:count]
+
+
+def generate_easy_challenge() -> tuple[str, str, list[str]]:
+    """Simple addition or subtraction — answer is always 1–9."""
     while True:
         op = random.choice(["add", "sub"])
         if op == "add":
             a = random.randint(1, 8)
-            b = random.randint(1, 9 - a)   # ensures a + b <= 9
+            b = random.randint(1, 9 - a)
             answer = a + b
             question = f"{a} + {b}"
         else:
             a = random.randint(2, 9)
-            b = random.randint(1, a - 1)   # ensures a - b >= 1
+            b = random.randint(1, a - 1)
             answer = a - b
-            question = f"{a} - {b}"
-
+            question = f"{a} − {b}"
         if 1 <= answer <= 9:
-            return question, answer
+            pool = [n for n in range(1, 10) if n != answer]
+            choices = [str(answer)] + [str(d) for d in random.sample(pool, 3)]
+            random.shuffle(choices)
+            return question, str(answer), choices
 
 
-def generate_decoys(correct: int) -> list[int]:
+def generate_medium_easy_challenge() -> tuple[str, str, list[str]]:
+    """Single operation — answer is 10–49. DOT intermediate tier."""
+    for _ in range(50):
+        op = random.choice(["add", "sub"])
+        if op == "add":
+            a = random.randint(5, 40)
+            b = random.randint(5, 49 - a)
+            ans = a + b
+            if 10 <= ans <= 49:
+                q = f"{a} + {b}"
+                choices = [str(ans)] + [str(d) for d in _numeric_decoys(ans, 10, 49)]
+                random.shuffle(choices)
+                return q, str(ans), choices
+        else:
+            a = random.randint(15, 70)
+            b = random.randint(1, a - 10)
+            ans = a - b
+            if 10 <= ans <= 49:
+                q = f"{a} − {b}"
+                choices = [str(ans)] + [str(d) for d in _numeric_decoys(ans, 10, 49)]
+                random.shuffle(choices)
+                return q, str(ans), choices
+    return generate_easy_challenge()
+
+
+def generate_medium_challenge() -> tuple[str, str, list[str]]:
+    """PEMDAS expression — integer answer 10–99."""
+    for _ in range(100):
+        pattern = random.choice(["add_mul", "mul_sub", "paren_add_mul", "two_products"])
+        ans, q = None, None
+        if pattern == "add_mul":
+            a, b, c = random.randint(1, 15), random.randint(2, 9), random.randint(2, 9)
+            ans, q = a + b * c, f"{a} + {b} × {c}"
+        elif pattern == "mul_sub":
+            a, b = random.randint(2, 9), random.randint(2, 9)
+            c = random.randint(1, 30)
+            ans, q = a * b - c, f"{a} × {b} − {c}"
+        elif pattern == "paren_add_mul":
+            a, b, c = random.randint(1, 9), random.randint(1, 9), random.randint(2, 9)
+            ans, q = (a + b) * c, f"({a} + {b}) × {c}"
+        elif pattern == "two_products":
+            a, b = random.randint(2, 7), random.randint(2, 7)
+            c, d = random.randint(2, 7), random.randint(2, 7)
+            ans, q = a * b + c * d, f"{a} × {b} + {c} × {d}"
+        if ans is not None and 10 <= ans <= 99:
+            choices = [str(ans)] + [str(d) for d in _numeric_decoys(ans, 10, 99)]
+            random.shuffle(choices)
+            return q, str(ans), choices
+    return generate_easy_challenge()
+
+
+def generate_hard_medium_challenge() -> tuple[str, str, list[str]]:
+    """Multi-step PEMDAS with nested parentheses — answer 10–99. DOT intermediate tier."""
+    for _ in range(100):
+        pattern = random.choice(["nested", "two_paren", "paren_sub_mul"])
+        ans, q = None, None
+        if pattern == "nested":
+            a, b, c, d = (random.randint(1, 9), random.randint(2, 9),
+                          random.randint(2, 9), random.randint(1, 15))
+            ans, q = (a + b * c) - d, f"({a} + {b} × {c}) − {d}"
+        elif pattern == "two_paren":
+            a, b = random.randint(2, 7), random.randint(1, 7)
+            c, d = random.randint(2, 7), random.randint(1, 7)
+            e = random.randint(2, 5)
+            ans, q = (a + b) * e - c * d, f"({a} + {b}) × {e} − {c} × {d}"
+        elif pattern == "paren_sub_mul":
+            a, b, c = random.randint(5, 15), random.randint(1, 5), random.randint(2, 8)
+            ans, q = (a - b) * c, f"({a} − {b}) × {c}"
+        if ans is not None and 10 <= ans <= 99:
+            choices = [str(ans)] + [str(d) for d in _numeric_decoys(ans, 10, 99)]
+            random.shuffle(choices)
+            return q, str(ans), choices
+    return generate_medium_challenge()
+
+
+def generate_hard_challenge() -> tuple[str, str, list[str]]:
+    """Algebraic equation — solve for x. Answer is 1–50."""
+    for _ in range(100):
+        form = random.choice(["linear_add", "linear_sub", "div_add", "combined"])
+        ans, q = None, None
+        if form == "linear_add":
+            x = random.randint(1, 15)
+            a, b = random.randint(2, 9), random.randint(1, 20)
+            c = a * x + b
+            ans, q = x, f"{a}x + {b} = {c}, solve for x"
+        elif form == "linear_sub":
+            x = random.randint(1, 15)
+            a, b = random.randint(2, 9), random.randint(1, 20)
+            c = a * x - b
+            if c < 1:
+                continue
+            ans, q = x, f"{a}x − {b} = {c}, solve for x"
+        elif form == "div_add":
+            a = random.randint(2, 5)
+            x_div = random.randint(1, 10)
+            x = x_div * a
+            b = random.randint(1, 10)
+            c = x_div + b
+            ans, q = x, f"x ÷ {a} + {b} = {c}, solve for x"
+        elif form == "combined":
+            x = random.randint(1, 12)
+            a, b = random.randint(2, 8), random.randint(2, 8)
+            c = (a + b) * x
+            ans, q = x, f"{a}x + {b}x = {c}, solve for x"
+        if ans is not None and 1 <= ans <= 50:
+            choices = [str(ans)] + [str(d) for d in _numeric_decoys(ans, 1, 50)]
+            random.shuffle(choices)
+            return q, str(ans), choices
+    return generate_medium_challenge()
+
+
+def generate_periodic_challenge() -> tuple[str, str, list[str]]:
+    """Periodic table — identify the symbol for a named element."""
+    correct_sym, correct_name = random.choice(PERIODIC_TABLE)
+    pool = [(sym, name) for sym, name in PERIODIC_TABLE if sym != correct_sym]
+    decoys = [sym for sym, _ in random.sample(pool, 3)]
+    choices = [correct_sym] + decoys
+    random.shuffle(choices)
+    q = f"Which symbol represents the element **{correct_name}**?"
+    return q, correct_sym, choices
+
+
+# ---------------------------------------------------------------------------
+# Difficulty Over Time helpers
+# ---------------------------------------------------------------------------
+
+def _dot_tier_durations(start_seconds: int) -> list[float | None]:
     """
-    Return 3 unique wrong single-digit answers (1-9) to go with the correct answer.
+    Returns per-tier durations for the 5 DOT tiers.
+    The final entry is None — Easy is the floor and holds indefinitely.
     """
-    pool = [n for n in range(1, 10) if n != correct]
-    return random.sample(pool, 3)
+    durations: list[float | None] = []
+    t = float(start_seconds)
+    for _ in range(4):          # Hard, Hard-Medium, Medium, Medium-Easy
+        durations.append(t)
+        t = t * DOT_DROPOFF
+    durations.append(None)      # Easy floor
+    return durations
+
+
+def _dot_tier_for_elapsed(elapsed_seconds: float, start_seconds: int) -> str:
+    """Return the active DOT tier name given elapsed seconds since the drop was posted."""
+    durations = _dot_tier_durations(start_seconds)
+    accumulated = 0.0
+    for i, dur in enumerate(durations):
+        if dur is None:
+            return DOT_TIERS[i]   # Easy, holds indefinitely
+        accumulated += dur
+        if elapsed_seconds < accumulated:
+            return DOT_TIERS[i]
+    return "easy"
+
+
+def _generate_for_tier(tier: str) -> tuple[str, str, list[str]]:
+    if tier == "hard":
+        return generate_hard_challenge()
+    elif tier == "hard_medium":
+        return generate_hard_medium_challenge()
+    elif tier == "medium":
+        return generate_medium_challenge()
+    elif tier == "medium_easy":
+        return generate_medium_easy_challenge()
+    else:
+        return generate_easy_challenge()
+
+
+def generate_challenge(
+    mode: str,
+    elapsed_seconds: float = 0.0,
+    dot_start_seconds: int = 60,
+) -> tuple[str, str, list[str]]:
+    """
+    Generate a (question, correct_answer, shuffled_choices) tuple
+    for the given verification mode.
+    """
+    if mode == "easy":
+        return generate_easy_challenge()
+    elif mode == "medium":
+        return generate_medium_challenge()
+    elif mode == "hard":
+        return generate_hard_challenge()
+    elif mode == "difficulty_over_time":
+        tier = _dot_tier_for_elapsed(elapsed_seconds, dot_start_seconds)
+        return _generate_for_tier(tier)
+    elif mode == "periodic":
+        return generate_periodic_challenge()
+    elif mode == "random":
+        picked = random.choice(["easy", "medium", "hard", "periodic"])
+        return generate_challenge(picked)
+    else:
+        return generate_easy_challenge()
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +618,8 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
     with get_db() as conn:
         row = conn.execute(
             """
-            SELECT mods_only, one_claim_per_batch, claim_verification
+            SELECT mods_only, one_claim_per_batch, claim_verification,
+                   verification_mode, dot_start_seconds
             FROM guild_settings WHERE guild_id = ?
             """,
             (guild_id,)
@@ -387,15 +629,17 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO guild_settings
-                    (guild_id, mods_only, one_claim_per_batch, claim_verification)
-                VALUES (?, 1, 1, 1)
+                    (guild_id, mods_only, one_claim_per_batch, claim_verification,
+                     verification_mode, dot_start_seconds)
+                VALUES (?, 1, 1, 1, 'easy', 60)
                 """,
                 (guild_id,)
             )
             conn.commit()
             row = conn.execute(
                 """
-                SELECT mods_only, one_claim_per_batch, claim_verification
+                SELECT mods_only, one_claim_per_batch, claim_verification,
+                       verification_mode, dot_start_seconds
                 FROM guild_settings WHERE guild_id = ?
                 """,
                 (guild_id,)
@@ -416,7 +660,7 @@ def get_claim_verification(guild_id: int) -> bool:
     return bool(_get_guild_settings(guild_id)["claim_verification"])
 
 
-def _update_guild_setting(guild_id: int, column: str, value: int) -> None:
+def _update_guild_setting(guild_id: int, column: str, value) -> None:
     """
     Generic upsert for a single guild_settings column.
     Only updates the target column — never overwrites others.
@@ -426,8 +670,9 @@ def _update_guild_setting(guild_id: int, column: str, value: int) -> None:
         conn.execute(
             """
             INSERT OR IGNORE INTO guild_settings
-                (guild_id, mods_only, one_claim_per_batch, claim_verification)
-            VALUES (?, 1, 1, 1)
+                (guild_id, mods_only, one_claim_per_batch, claim_verification,
+                 verification_mode, dot_start_seconds)
+            VALUES (?, 1, 1, 1, 'easy', 60)
             """,
             (guild_id,)
         )
@@ -448,6 +693,24 @@ def set_one_claim_per_batch(guild_id: int, enabled: bool) -> None:
 
 def set_claim_verification(guild_id: int, enabled: bool) -> None:
     _update_guild_setting(guild_id, "claim_verification", 1 if enabled else 0)
+
+
+def get_verification_mode(guild_id: int) -> str:
+    mode = _get_guild_settings(guild_id)["verification_mode"]
+    return mode if mode in VERIFICATION_MODES else "easy"
+
+
+def set_verification_mode(guild_id: int, mode: str) -> None:
+    _update_guild_setting(guild_id, "verification_mode", mode)
+
+
+def get_dot_start_seconds(guild_id: int) -> int:
+    val = _get_guild_settings(guild_id)["dot_start_seconds"]
+    return int(val) if val else 60
+
+
+def set_dot_start_seconds(guild_id: int, seconds: int) -> None:
+    _update_guild_setting(guild_id, "dot_start_seconds", seconds)
 
 
 async def user_can_use_bot(interaction: discord.Interaction) -> bool:
@@ -595,13 +858,15 @@ async def mark_code_expired(
 class MathChallengeView(discord.ui.View):
     """
     Ephemeral view shown after clicking Claim Code when verification is ON.
-    Presents a simple math question with 4 answer buttons.
-    Times out after 30 seconds — card stays live for others.
+    Presents a challenge question with 4 answer buttons.
+    Times out after 60 seconds — card stays live for others.
     """
 
     def __init__(
         self,
-        correct_answer: int,
+        question: str,
+        correct_answer: str,
+        choices: list[str],
         message_id: int,
         code_to_send: str,
         item_to_send: str,
@@ -612,7 +877,7 @@ class MathChallengeView(discord.ui.View):
         guild_id: int | None,
         channel_id: int | None,
     ):
-        super().__init__(timeout=30)
+        super().__init__(timeout=60)
         self.correct_answer   = correct_answer
         self.message_id       = message_id
         self.code_to_send     = code_to_send
@@ -625,19 +890,15 @@ class MathChallengeView(discord.ui.View):
         self.channel_id       = channel_id
         self.answered         = False
 
-        # Build answer choices: correct + 3 decoys, shuffled
-        choices = [correct_answer] + generate_decoys(correct_answer)
-        random.shuffle(choices)
-
         for choice in choices:
             btn = discord.ui.Button(
                 label=str(choice),
                 style=discord.ButtonStyle.secondary,
             )
-            btn.callback = self._make_answer_callback(choice)
+            btn.callback = self._make_answer_callback(str(choice))
             self.add_item(btn)
 
-    def _make_answer_callback(self, choice: int):
+    def _make_answer_callback(self, choice: str):
         async def callback(interaction: discord.Interaction):
             if self.answered:
                 await interaction.response.send_message(
@@ -788,7 +1049,7 @@ class ClaimButtonView(discord.ui.View):
             row = conn.execute(
                 """
                 SELECT product_code, item_name, platform, expires_at,
-                       channel_id, sharer_id, sharer_name, batch_id
+                       channel_id, sharer_id, sharer_name, batch_id, created_at
                 FROM shared_codes WHERE message_id = ?
                 """,
                 (msg_id,),
@@ -854,13 +1115,43 @@ class ClaimButtonView(discord.ui.View):
                 )
                 return
 
-        # Claim verification — show math challenge if enabled
+        # Claim verification — show challenge if enabled
         if guild_id and get_claim_verification(guild_id):
-            question, correct_answer = generate_math_challenge()
+            mode        = get_verification_mode(guild_id)
+            dot_start   = get_dot_start_seconds(guild_id)
+
+            # For DOT: derive elapsed seconds since the drop was posted
+            elapsed = 0.0
+            if mode == "difficulty_over_time":
+                created_at_str = row["created_at"] if row else None
+                if created_at_str:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at_str)
+                        elapsed = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                        elapsed = max(0.0, elapsed)
+                    except (ValueError, TypeError):
+                        elapsed = 0.0
+
+            question, correct_answer, choices = generate_challenge(mode, elapsed, dot_start)
             _pending_challenges[(msg_id, interaction.user.id)] = correct_answer
 
+            # Build a tier label for DOT so claimers can see current difficulty
+            tier_label = ""
+            if mode == "difficulty_over_time":
+                tier = _dot_tier_for_elapsed(elapsed, dot_start)
+                tier_display = {
+                    "hard":        "Hard 🔴",
+                    "hard_medium": "Hard-Medium 🟠",
+                    "medium":      "Medium 🟡",
+                    "medium_easy": "Medium-Easy 🟢",
+                    "easy":        "Easy 🔵",
+                }.get(tier, "")
+                tier_label = f"\n*Difficulty: {tier_display}*"
+
             challenge_view = MathChallengeView(
+                question=question,
                 correct_answer=correct_answer,
+                choices=choices,
                 message_id=msg_id,
                 code_to_send=code_to_send,
                 item_to_send=item_to_send,
@@ -873,8 +1164,8 @@ class ClaimButtonView(discord.ui.View):
             )
 
             await interaction.response.send_message(
-                f"**Quick check — what is {question}?**\n"
-                "Answer within 30 seconds to claim your code.",
+                f"**{question}**{tier_label}\n"
+                "Answer within 60 seconds to claim your code.",
                 view=challenge_view,
                 ephemeral=True,
             )
@@ -967,6 +1258,46 @@ class ClaimButtonView(discord.ui.View):
             print(f"[Claim] Could not update public card {msg_id}: {exc}")
 
 
+class DOTTimerModal(discord.ui.Modal, title="Difficulty Over Time — Starting Duration"):
+    start_seconds = discord.ui.TextInput(
+        label="Starting duration for Hard tier (seconds)",
+        style=discord.TextStyle.short,
+        required=True,
+        min_length=1,
+        max_length=4,
+        placeholder="e.g. 60",
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.start_seconds.value).strip()
+        try:
+            seconds = int(raw)
+            if not (10 <= seconds <= 3600):
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Enter a whole number between 10 and 3600 seconds.",
+                ephemeral=True,
+            )
+            return
+
+        set_dot_start_seconds(self.guild_id, seconds)
+        durations: list[float | None] = _dot_tier_durations(seconds)
+        tier_str = " → ".join(
+            f"{int(d)}s" if d is not None else "Easy (holds)"
+            for d in durations
+        )
+        await interaction.response.send_message(
+            f"✅ DOT start time set to **{seconds}s**.\n"
+            f"Tier progression: {tier_str}",
+            ephemeral=True,
+        )
+
+
 class SettingsView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=180)
@@ -975,11 +1306,15 @@ class SettingsView(discord.ui.View):
         mods_only           = get_mods_only(guild_id)
         one_claim_per_batch = get_one_claim_per_batch(guild_id)
         claim_verification  = get_claim_verification(guild_id)
+        verification_mode   = get_verification_mode(guild_id)
+        dot_start_seconds   = get_dot_start_seconds(guild_id)
 
+        # Row 0 — toggle buttons
         mods_toggle = discord.ui.Button(
             label="Mods Only: ON" if mods_only else "Mods Only: OFF",
             style=discord.ButtonStyle.success if mods_only else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_mods_only",
+            row=0,
         )
         mods_toggle.callback = self._toggle_mods_callback
         self.add_item(mods_toggle)
@@ -988,6 +1323,7 @@ class SettingsView(discord.ui.View):
             label="One Claim Per Batch: ON" if one_claim_per_batch else "One Claim Per Batch: OFF",
             style=discord.ButtonStyle.success if one_claim_per_batch else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_one_claim_per_batch",
+            row=0,
         )
         batch_toggle.callback = self._toggle_batch_callback
         self.add_item(batch_toggle)
@@ -996,9 +1332,68 @@ class SettingsView(discord.ui.View):
             label="Claim Verification: ON" if claim_verification else "Claim Verification: OFF",
             style=discord.ButtonStyle.success if claim_verification else discord.ButtonStyle.danger,
             custom_id="codeclaimer_toggle_claim_verification",
+            row=0,
         )
         verify_toggle.callback = self._toggle_verify_callback
         self.add_item(verify_toggle)
+
+        # Row 1 — Challenge mode dropdown
+        mode_select = discord.ui.Select(
+            placeholder=f"Challenge Mode: {VERIFICATION_MODES.get(verification_mode, verification_mode)}",
+            custom_id="codeclaimer_verification_mode_select",
+            row=1,
+            options=[
+                discord.SelectOption(
+                    label="Easy",
+                    value="easy",
+                    description="Simple addition or subtraction — answer under 10",
+                    default=(verification_mode == "easy"),
+                ),
+                discord.SelectOption(
+                    label="Medium",
+                    value="medium",
+                    description="PEMDAS expression — answer under 100",
+                    default=(verification_mode == "medium"),
+                ),
+                discord.SelectOption(
+                    label="Hard",
+                    value="hard",
+                    description="Algebraic equation — solve for x",
+                    default=(verification_mode == "hard"),
+                ),
+                discord.SelectOption(
+                    label="Difficulty Over Time",
+                    value="difficulty_over_time",
+                    description="Starts Hard, descends to Easy as time passes",
+                    default=(verification_mode == "difficulty_over_time"),
+                ),
+                discord.SelectOption(
+                    label="Periodic Table",
+                    value="periodic",
+                    description="Identify the symbol for a named element",
+                    default=(verification_mode == "periodic"),
+                ),
+                discord.SelectOption(
+                    label="Random",
+                    value="random",
+                    description="Bot picks a mode randomly for each claim",
+                    default=(verification_mode == "random"),
+                ),
+            ],
+        )
+        mode_select.callback = self._mode_select_callback
+        self.add_item(mode_select)
+
+        # Row 2 — DOT timer config button (only when DOT mode is active)
+        if verification_mode == "difficulty_over_time":
+            dot_btn = discord.ui.Button(
+                label=f"DOT Start Time: {dot_start_seconds}s",
+                style=discord.ButtonStyle.secondary,
+                custom_id="codeclaimer_dot_timer_btn",
+                row=2,
+            )
+            dot_btn.callback = self._dot_timer_callback
+            self.add_item(dot_btn)
 
     async def _toggle_mods_callback(self, interaction: discord.Interaction):
         if not await self._mod_check(interaction):
@@ -1026,6 +1421,21 @@ class SettingsView(discord.ui.View):
             embed=build_settings_embed(interaction.guild.id),
             view=SettingsView(interaction.guild.id),
         )
+
+    async def _mode_select_callback(self, interaction: discord.Interaction):
+        if not await self._mod_check(interaction):
+            return
+        selected = interaction.data["values"][0]
+        set_verification_mode(interaction.guild.id, selected)
+        await interaction.response.edit_message(
+            embed=build_settings_embed(interaction.guild.id),
+            view=SettingsView(interaction.guild.id),
+        )
+
+    async def _dot_timer_callback(self, interaction: discord.Interaction):
+        if not await self._mod_check(interaction):
+            return
+        await interaction.response.send_modal(DOTTimerModal(interaction.guild.id))
 
     async def _mod_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
@@ -1183,6 +1593,8 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
     mods_only           = get_mods_only(guild_id)
     one_claim_per_batch = get_one_claim_per_batch(guild_id)
     claim_verification  = get_claim_verification(guild_id)
+    verification_mode   = get_verification_mode(guild_id)
+    dot_start_seconds   = get_dot_start_seconds(guild_id)
 
     embed = discord.Embed(
         title="CodeClaimer Settings",
@@ -1216,16 +1628,28 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
         ),
         inline=False,
     )
+
+    mode_label = VERIFICATION_MODES.get(verification_mode, verification_mode)
+    if verification_mode == "difficulty_over_time":
+        durations = _dot_tier_durations(dot_start_seconds)
+        tier_str = " → ".join(
+            f"{int(d)}s" if d is not None else "Easy (holds)"
+            for d in durations
+        )
+        mode_detail = f"\n*Timer: {tier_str}*"
+    else:
+        mode_detail = ""
+
     embed.add_field(
         name="Claim Verification",
         value=(
-            f"**{'ON' if claim_verification else 'OFF'}**\n"
+            f"**{'ON' if claim_verification else 'OFF'}** — Mode: **{mode_label}**{mode_detail}\n"
             + (
-                "Members must answer a quick math question before receiving a code."
+                "Members must solve a challenge before receiving a code."
                 if claim_verification
-                else "No verification required. Codes are claimed instantly on click — first to click wins."
+                else "No verification required. First to click wins."
             )
-            + "\n\nHelps slow down fast claiming and reduces automated claiming."
+            + "\n\nHelps slow fast claiming and reduces automated claiming."
         ),
         inline=False,
     )
@@ -1235,6 +1659,8 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
             "[Vote on Top.gg](https://top.gg/bot/1511758084194832495)"
             " | "
             "[Send some Ko-fi](https://ko-fi.com/artchemylabs)"
+            " | "
+            "[Support Server](https://discord.gg/NSt5Rcm8VN)"
         ),
         inline=False,
     )
@@ -1522,7 +1948,14 @@ async def help_command(interaction: discord.Interaction):
             "Toggle server settings:\n"
             "**Mods Only** — restrict sharing commands to moderators\n"
             "**One Claim Per Batch** — one code per member per bulk drop\n"
-            "**Claim Verification** — math question before claiming\n\n"
+            "**Claim Verification** — challenge question before claiming\n\n"
+            "**Challenge Modes** (dropdown in /settings):\n"
+            "Easy — simple addition or subtraction\n"
+            "Medium — PEMDAS expression, answer under 100\n"
+            "Hard — algebraic equation, solve for x\n"
+            "Difficulty Over Time — starts Hard, descends to Easy as time passes\n"
+            "Periodic Table — identify the symbol for a named element\n"
+            "Random — bot picks a mode fresh each claim\n\n"
             "Moderator = Administrator, Manage Server, or Manage Messages."
         ),
         inline=False,

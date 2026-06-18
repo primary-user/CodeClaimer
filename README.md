@@ -314,12 +314,6 @@ Read Message History
 
 > **Mention Everyone** is required if mods want `@everyone` or `@here` in pre-drop messages to actually ping.
 
-Privileged Gateway Intent:
-
-```text
-Message Content Intent
-```
-
 ---
 
 ## Requirements

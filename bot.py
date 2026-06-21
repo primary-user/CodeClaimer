@@ -1911,7 +1911,6 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
 class CodeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):

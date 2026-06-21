@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import random
 import asyncio
 import sqlite3
@@ -127,6 +128,14 @@ def init_db() -> None:
                 PRIMARY KEY (batch_id, user_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS claim_cooldowns (
+                user_id    INTEGER NOT NULL,
+                guild_id   INTEGER NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        """)
 
         # Forward migrations — safe on existing databases, never drops data
         existing_codes = {row[1] for row in conn.execute("PRAGMA table_info(shared_codes)")}
@@ -144,10 +153,12 @@ def init_db() -> None:
 
         existing_settings = {row[1] for row in conn.execute("PRAGMA table_info(guild_settings)")}
         for col, definition in [
-            ("one_claim_per_batch", "INTEGER NOT NULL DEFAULT 1"),
-            ("claim_verification",  "INTEGER NOT NULL DEFAULT 1"),
-            ("verification_mode",   "TEXT NOT NULL DEFAULT 'easy'"),
-            ("dot_start_seconds",   "INTEGER NOT NULL DEFAULT 60"),
+            ("one_claim_per_batch",    "INTEGER NOT NULL DEFAULT 1"),
+            ("claim_verification",     "INTEGER NOT NULL DEFAULT 1"),
+            ("verification_mode",      "TEXT NOT NULL DEFAULT 'easy'"),
+            ("dot_start_seconds",      "INTEGER NOT NULL DEFAULT 60"),
+            ("claim_roles",            "TEXT NOT NULL DEFAULT ''"),
+            ("claim_cooldown_minutes", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             if col not in existing_settings:
                 conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {definition}")
@@ -178,8 +189,8 @@ def seed_guild_settings(guild_ids: list[int]) -> None:
             """
             INSERT OR IGNORE INTO guild_settings
                 (guild_id, mods_only, one_claim_per_batch, claim_verification,
-                 verification_mode, dot_start_seconds)
-            VALUES (?, 1, 1, 1, 'easy', 60)
+                 verification_mode, dot_start_seconds, claim_roles, claim_cooldown_minutes)
+            VALUES (?, 1, 1, 1, 'easy', 60, '', 0)
             """,
             [(gid,) for gid in guild_ids],
         )
@@ -619,7 +630,8 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
         row = conn.execute(
             """
             SELECT mods_only, one_claim_per_batch, claim_verification,
-                   verification_mode, dot_start_seconds
+                   verification_mode, dot_start_seconds,
+                   claim_roles, claim_cooldown_minutes
             FROM guild_settings WHERE guild_id = ?
             """,
             (guild_id,)
@@ -630,8 +642,8 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
                 """
                 INSERT OR IGNORE INTO guild_settings
                     (guild_id, mods_only, one_claim_per_batch, claim_verification,
-                     verification_mode, dot_start_seconds)
-                VALUES (?, 1, 1, 1, 'easy', 60)
+                     verification_mode, dot_start_seconds, claim_roles, claim_cooldown_minutes)
+                VALUES (?, 1, 1, 1, 'easy', 60, '', 0)
                 """,
                 (guild_id,)
             )
@@ -639,7 +651,8 @@ def _get_guild_settings(guild_id: int) -> sqlite3.Row:
             row = conn.execute(
                 """
                 SELECT mods_only, one_claim_per_batch, claim_verification,
-                       verification_mode, dot_start_seconds
+                       verification_mode, dot_start_seconds,
+                       claim_roles, claim_cooldown_minutes
                 FROM guild_settings WHERE guild_id = ?
                 """,
                 (guild_id,)
@@ -671,8 +684,8 @@ def _update_guild_setting(guild_id: int, column: str, value) -> None:
             """
             INSERT OR IGNORE INTO guild_settings
                 (guild_id, mods_only, one_claim_per_batch, claim_verification,
-                 verification_mode, dot_start_seconds)
-            VALUES (?, 1, 1, 1, 'easy', 60)
+                 verification_mode, dot_start_seconds, claim_roles, claim_cooldown_minutes)
+            VALUES (?, 1, 1, 1, 'easy', 60, '', 0)
             """,
             (guild_id,)
         )
@@ -711,6 +724,94 @@ def get_dot_start_seconds(guild_id: int) -> int:
 
 def set_dot_start_seconds(guild_id: int, seconds: int) -> None:
     _update_guild_setting(guild_id, "dot_start_seconds", seconds)
+
+
+def get_claim_roles(guild_id: int) -> list[int]:
+    raw = _get_guild_settings(guild_id)["claim_roles"] or ""
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+
+
+def set_claim_roles(guild_id: int, role_ids: list[int]) -> None:
+    _update_guild_setting(guild_id, "claim_roles", json.dumps(role_ids) if role_ids else "")
+
+
+def get_claim_cooldown_minutes(guild_id: int) -> int:
+    val = _get_guild_settings(guild_id)["claim_cooldown_minutes"]
+    return int(val) if val else 0
+
+
+def set_claim_cooldown_minutes(guild_id: int, minutes: int) -> None:
+    _update_guild_setting(guild_id, "claim_cooldown_minutes", minutes)
+
+
+# ---------------------------------------------------------------------------
+# Role gate helpers
+# ---------------------------------------------------------------------------
+
+def user_passes_role_gate(member: discord.Member, required_role_ids: list[int]) -> bool:
+    """
+    Returns True if the member is allowed to claim.
+    No configured roles = open to all.
+    Mods always bypass the role gate.
+    """
+    if not required_role_ids:
+        return True
+    if is_moderator(member):
+        return True
+    member_role_ids = {role.id for role in member.roles}
+    return bool(member_role_ids & set(required_role_ids))
+
+
+# ---------------------------------------------------------------------------
+# Cooldown tracking
+# ---------------------------------------------------------------------------
+
+def get_cooldown_remaining(user_id: int, guild_id: int, cooldown_minutes: int) -> float:
+    """Returns seconds remaining on cooldown, or 0.0 if no cooldown is active."""
+    if cooldown_minutes <= 0:
+        return 0.0
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT claimed_at FROM claim_cooldowns WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id)
+        ).fetchone()
+    if row is None:
+        return 0.0
+    try:
+        claimed_dt  = datetime.fromisoformat(row["claimed_at"])
+        cooldown_end = claimed_dt + timedelta(minutes=cooldown_minutes)
+        remaining    = (cooldown_end - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, remaining)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def record_claim_cooldown(user_id: int, guild_id: int) -> None:
+    """Record or refresh a user's claim timestamp for cooldown tracking."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO claim_cooldowns (user_id, guild_id, claimed_at)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, guild_id, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+
+
+def format_cooldown_remaining(remaining_seconds: float) -> str:
+    """Format seconds remaining as a human-readable string."""
+    total = int(remaining_seconds)
+    mins  = total // 60
+    secs  = total % 60
+    if mins > 0:
+        return f"{mins} minute{'s' if mins != 1 else ''} and {secs} second{'s' if secs != 1 else ''}"
+    return f"{secs} second{'s' if secs != 1 else ''}"
 
 
 async def user_can_use_bot(interaction: discord.Interaction) -> bool:
@@ -992,6 +1093,9 @@ class MathChallengeView(discord.ui.View):
             if self.batch_id and self.guild_id:
                 record_batch_claim(self.batch_id, interaction.user.id, self.guild_id)
 
+            if self.guild_id:
+                record_claim_cooldown(interaction.user.id, self.guild_id)
+
             _pending_challenges.pop((self.message_id, interaction.user.id), None)
 
             await interaction.response.send_message(
@@ -1114,6 +1218,28 @@ class ClaimButtonView(discord.ui.View):
                     ephemeral=True,
                 )
                 return
+
+        # Role gate check
+        if guild_id:
+            required_roles = get_claim_roles(guild_id)
+            if required_roles and not user_passes_role_gate(interaction.user, required_roles):
+                await interaction.response.send_message(
+                    "You don't have the required role to claim codes in this server.",
+                    ephemeral=True,
+                )
+                return
+
+        # Cooldown check
+        if guild_id:
+            cooldown_minutes = get_claim_cooldown_minutes(guild_id)
+            if cooldown_minutes > 0:
+                remaining = get_cooldown_remaining(interaction.user.id, guild_id, cooldown_minutes)
+                if remaining > 0:
+                    await interaction.response.send_message(
+                        f"You're on cooldown. Try again in **{format_cooldown_remaining(remaining)}**.",
+                        ephemeral=True,
+                    )
+                    return
 
         # Claim verification — show challenge if enabled
         if guild_id and get_claim_verification(guild_id):
@@ -1240,6 +1366,9 @@ class ClaimButtonView(discord.ui.View):
         if batch_id and guild_id:
             record_batch_claim(batch_id, interaction.user.id, guild_id)
 
+        if guild_id:
+            record_claim_cooldown(interaction.user.id, guild_id)
+
         await interaction.response.send_message(
             "The code has been sent to your DMs!", ephemeral=True
         )
@@ -1298,6 +1427,40 @@ class DOTTimerModal(discord.ui.Modal, title="Difficulty Over Time — Starting D
         )
 
 
+class CooldownModal(discord.ui.Modal, title="Claim Cooldown"):
+    minutes = discord.ui.TextInput(
+        label="Cooldown in minutes (0 = disabled)",
+        style=discord.TextStyle.short,
+        required=True,
+        min_length=1,
+        max_length=4,
+        placeholder="e.g. 5  (0 to turn off)",
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.minutes.value).strip()
+        try:
+            mins = int(raw)
+            if not (0 <= mins <= 1440):
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Enter a whole number between 0 and 1440 minutes (0 = disabled).",
+                ephemeral=True,
+            )
+            return
+        set_claim_cooldown_minutes(self.guild_id, mins)
+        if mins == 0:
+            msg = "✅ Claim cooldown disabled."
+        else:
+            msg = f"✅ Claim cooldown set to **{mins} minute{'s' if mins != 1 else ''}**."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
 class SettingsView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=180)
@@ -1308,6 +1471,7 @@ class SettingsView(discord.ui.View):
         claim_verification  = get_claim_verification(guild_id)
         verification_mode   = get_verification_mode(guild_id)
         dot_start_seconds   = get_dot_start_seconds(guild_id)
+        cooldown_minutes    = get_claim_cooldown_minutes(guild_id)
 
         # Row 0 — toggle buttons
         mods_toggle = discord.ui.Button(
@@ -1384,13 +1548,39 @@ class SettingsView(discord.ui.View):
         mode_select.callback = self._mode_select_callback
         self.add_item(mode_select)
 
-        # Row 2 — DOT timer config button (only when DOT mode is active)
+        # Row 2 — Claim role gate (multi-select)
+        role_select = discord.ui.RoleSelect(
+            placeholder="Claim Roles: Open to all — select to restrict",
+            custom_id="codeclaimer_claim_roles_select",
+            min_values=0,
+            max_values=25,
+            row=2,
+        )
+        role_select.callback = self._role_select_callback
+        self.add_item(role_select)
+
+        # Row 3 — Cooldown button
+        cooldown_label = (
+            f"Claim Cooldown: {cooldown_minutes}m"
+            if cooldown_minutes > 0
+            else "Claim Cooldown: Off"
+        )
+        cooldown_btn = discord.ui.Button(
+            label=cooldown_label,
+            style=discord.ButtonStyle.secondary,
+            custom_id="codeclaimer_cooldown_btn",
+            row=3,
+        )
+        cooldown_btn.callback = self._cooldown_callback
+        self.add_item(cooldown_btn)
+
+        # Row 4 — DOT timer config button (only when DOT mode is active)
         if verification_mode == "difficulty_over_time":
             dot_btn = discord.ui.Button(
                 label=f"DOT Start Time: {dot_start_seconds}s",
                 style=discord.ButtonStyle.secondary,
                 custom_id="codeclaimer_dot_timer_btn",
-                row=2,
+                row=4,
             )
             dot_btn.callback = self._dot_timer_callback
             self.add_item(dot_btn)
@@ -1431,6 +1621,21 @@ class SettingsView(discord.ui.View):
             embed=build_settings_embed(interaction.guild.id),
             view=SettingsView(interaction.guild.id),
         )
+
+    async def _role_select_callback(self, interaction: discord.Interaction):
+        if not await self._mod_check(interaction):
+            return
+        selected_ids = [int(v) for v in interaction.data.get("values", [])]
+        set_claim_roles(interaction.guild.id, selected_ids)
+        await interaction.response.edit_message(
+            embed=build_settings_embed(interaction.guild.id),
+            view=SettingsView(interaction.guild.id),
+        )
+
+    async def _cooldown_callback(self, interaction: discord.Interaction):
+        if not await self._mod_check(interaction):
+            return
+        await interaction.response.send_modal(CooldownModal(interaction.guild.id))
 
     async def _dot_timer_callback(self, interaction: discord.Interaction):
         if not await self._mod_check(interaction):
@@ -1595,6 +1800,8 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
     claim_verification  = get_claim_verification(guild_id)
     verification_mode   = get_verification_mode(guild_id)
     dot_start_seconds   = get_dot_start_seconds(guild_id)
+    claim_roles         = get_claim_roles(guild_id)
+    cooldown_minutes    = get_claim_cooldown_minutes(guild_id)
 
     embed = discord.Embed(
         title="CodeClaimer Settings",
@@ -1653,6 +1860,36 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
         ),
         inline=False,
     )
+
+    if claim_roles:
+        role_mentions = " ".join(f"<@&{rid}>" for rid in claim_roles)
+        role_value = (
+            f"**Restricted** — {role_mentions}\n"
+            "Members need at least one of these roles to claim. Mods always bypass."
+        )
+    else:
+        role_value = "**Open to all** — No role restriction on claiming."
+
+    embed.add_field(
+        name="Claim Role Gate",
+        value=role_value,
+        inline=False,
+    )
+
+    if cooldown_minutes > 0:
+        cooldown_value = (
+            f"**{cooldown_minutes} minute{'s' if cooldown_minutes != 1 else ''}** — "
+            "Members must wait this long between claims in this server."
+        )
+    else:
+        cooldown_value = "**Off** — No cooldown between claims."
+
+    embed.add_field(
+        name="Claim Cooldown",
+        value=cooldown_value,
+        inline=False,
+    )
+
     embed.add_field(
         name="Support",
         value=(
@@ -1674,6 +1911,7 @@ def build_settings_embed(guild_id: int) -> discord.Embed:
 class CodeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -1947,7 +2185,9 @@ async def help_command(interaction: discord.Interaction):
             "Toggle server settings:\n"
             "**Mods Only** — restrict sharing commands to moderators\n"
             "**One Claim Per Batch** — one code per member per bulk drop\n"
-            "**Claim Verification** — challenge question before claiming\n\n"
+            "**Claim Verification** — challenge question before claiming\n"
+            "**Claim Role Gate** — restrict claiming to specific roles\n"
+            "**Claim Cooldown** — minimum time between claims per user\n\n"
             "**Challenge Modes** (dropdown in /settings):\n"
             "Easy — simple addition or subtraction\n"
             "Medium — PEMDAS expression, answer under 100\n"

@@ -2127,6 +2127,7 @@ async def bulkshare(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="settings", description="Open CodeClaimer settings.")
+@app_commands.default_permissions(manage_messages=True)
 async def settings_command(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message(

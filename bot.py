@@ -783,7 +783,7 @@ def get_cooldown_remaining(user_id: int, guild_id: int, cooldown_minutes: int) -
     if row is None:
         return 0.0
     try:
-        claimed_dt   = datetime.fromisoformat(row["claimed_at"])
+        claimed_dt  = datetime.fromisoformat(row["claimed_at"])
         cooldown_end = claimed_dt + timedelta(minutes=cooldown_minutes)
         remaining    = (cooldown_end - datetime.now(timezone.utc)).total_seconds()
         return max(0.0, remaining)
@@ -2136,7 +2136,7 @@ async def settings_command(interaction: discord.Interaction):
         return
     if not is_moderator(interaction.user):
         await interaction.response.send_message(
-            "Only moderators can access CodeClaimer settings.", ephemeral=True
+            "Only moderators can open CodeClaimer settings.", ephemeral=True
         )
         return
     await interaction.response.send_message(
@@ -2190,7 +2190,9 @@ async def help_command(interaction: discord.Interaction):
             "Toggle server settings:\n"
             "**Mods Only** — restrict sharing commands to moderators\n"
             "**One Claim Per Batch** — one code per member per bulk drop\n"
-            "**Claim Verification** — challenge question before claiming\n\n"
+            "**Claim Verification** — challenge question before claiming\n"
+            "**Claim Role Gate** — restrict claiming to specific roles\n"
+            "**Claim Cooldown** — minimum time between claims per user\n\n"
             "**Challenge Modes** (dropdown in /settings):\n"
             "Easy — simple addition or subtraction\n"
             "Medium — PEMDAS expression, answer under 100\n"

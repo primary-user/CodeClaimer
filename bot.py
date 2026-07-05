@@ -136,6 +136,21 @@ def init_db() -> None:
                 PRIMARY KEY (user_id, guild_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS claims_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id     INTEGER NOT NULL,
+                channel_id   INTEGER,
+                message_id   INTEGER,
+                claimer_id   INTEGER NOT NULL,
+                claimer_name TEXT    NOT NULL,
+                item_name    TEXT    NOT NULL,
+                platform     TEXT    NOT NULL DEFAULT '',
+                sharer_id    INTEGER,
+                sharer_name  TEXT,
+                claimed_at   TEXT    NOT NULL
+            )
+        """)
 
         # Forward migrations — safe on existing databases, never drops data
         existing_codes = {row[1] for row in conn.execute("PRAGMA table_info(shared_codes)")}
@@ -172,6 +187,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_batch_claims_batch
             ON batch_claims (batch_id)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_claims_log_guild
+            ON claims_log (guild_id, claimed_at DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_claims_log_claimer
+            ON claims_log (guild_id, claimer_id)
+        """)
 
         conn.commit()
 
@@ -195,6 +218,70 @@ def seed_guild_settings(guild_ids: list[int]) -> None:
             [(gid,) for gid in guild_ids],
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Claims log helpers
+# ---------------------------------------------------------------------------
+
+def log_claim(
+    guild_id: int,
+    channel_id: int | None,
+    message_id: int,
+    claimer_id: int,
+    claimer_name: str,
+    item_name: str,
+    platform: str,
+    sharer_id: int | None,
+    sharer_name: str,
+) -> None:
+    """Insert a successful claim into claims_log."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO claims_log
+                (guild_id, channel_id, message_id, claimer_id, claimer_name,
+                 item_name, platform, sharer_id, sharer_name, claimed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id, channel_id, message_id, claimer_id, claimer_name,
+                item_name, platform, sharer_id, sharer_name,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+
+
+def get_claim_log(
+    guild_id: int,
+    limit: int = 30,
+    claimer_id: int | None = None,
+    item_filter: str | None = None,
+) -> list:
+    """Return recent claims for a guild, with optional filters."""
+    query = """
+        SELECT id, claimer_id, claimer_name, item_name, platform,
+               sharer_name, channel_id, message_id, claimed_at
+        FROM claims_log
+        WHERE guild_id = ?
+    """
+    params: list = [guild_id]
+
+    if claimer_id is not None:
+        query += " AND claimer_id = ?"
+        params.append(claimer_id)
+
+    if item_filter:
+        query += " AND item_name LIKE ?"
+        params.append(f"%{item_filter}%")
+
+    query += " ORDER BY claimed_at DESC LIMIT ?"
+    params.append(limit)
+
+    with get_db() as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(query, params).fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +405,52 @@ def build_claimed_embed(
         ),
         color=discord.Color.dark_grey(),
     )
+
+
+def build_claimlog_embed(
+    entries: list,
+    page: int,
+    total_pages: int,
+    total_count: int,
+    filter_desc: str,
+    page_start: int,
+) -> discord.Embed:
+    """Build a paginated embed for /claimlog."""
+    title = f"📋 Claim Log{f'  —  {filter_desc}' if filter_desc else ''}"
+
+    if not entries:
+        return discord.Embed(
+            title=title,
+            description="No claims found matching those filters.",
+            color=discord.Color.blurple(),
+        )
+
+    lines = []
+    for i, row in enumerate(entries, start=page_start):
+        platform = f" ({row['platform']})" if row["platform"] else ""
+        sharer = row["sharer_name"] or "Unknown"
+        try:
+            dt = datetime.fromisoformat(row["claimed_at"])
+            unix = int(dt.timestamp())
+            time_str = f"<t:{unix}:R>"
+        except (ValueError, TypeError):
+            time_str = "unknown time"
+        lines.append(
+            f"**{i}.** **{row['item_name']}**{platform} · "
+            f"claimed by **{row['claimer_name']}** (`{row['claimer_id']}`) · "
+            f"shared by {sharer} · {time_str}"
+        )
+
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(
+        text=f"Page {page} of {total_pages} · "
+             f"{total_count} result{'s' if total_count != 1 else ''}"
+    )
+    return embed
 
 
 def build_already_claimed_embed() -> discord.Embed:
@@ -974,6 +1107,8 @@ class MathChallengeView(discord.ui.View):
         platform_to_send: str,
         expires_to_send: str,
         sharer_display: str,
+        sharer_id: int | None,
+        sharer_name: str,
         batch_id: str,
         guild_id: int | None,
         channel_id: int | None,
@@ -986,6 +1121,8 @@ class MathChallengeView(discord.ui.View):
         self.platform_to_send = platform_to_send
         self.expires_to_send  = expires_to_send
         self.sharer_display   = sharer_display
+        self.sharer_id        = sharer_id
+        self.sharer_name      = sharer_name
         self.batch_id         = batch_id
         self.guild_id         = guild_id
         self.channel_id       = channel_id
@@ -1092,6 +1229,18 @@ class MathChallengeView(discord.ui.View):
 
             if self.guild_id:
                 record_claim_cooldown(interaction.user.id, self.guild_id)
+
+            log_claim(
+                guild_id=self.guild_id,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
+                claimer_id=interaction.user.id,
+                claimer_name=interaction.user.display_name,
+                item_name=self.item_to_send,
+                platform=self.platform_to_send,
+                sharer_id=self.sharer_id,
+                sharer_name=self.sharer_name,
+            )
 
             _pending_challenges.pop((self.message_id, interaction.user.id), None)
 
@@ -1275,6 +1424,8 @@ class ClaimButtonView(discord.ui.View):
                 platform_to_send=platform_to_send,
                 expires_to_send=expires_to_send,
                 sharer_display=sharer_display,
+                sharer_id=sharer_id,
+                sharer_name=sharer_name_db,
                 batch_id=batch_id,
                 guild_id=guild_id,
                 channel_id=channel_id,
@@ -1356,6 +1507,18 @@ class ClaimButtonView(discord.ui.View):
 
         if guild_id:
             record_claim_cooldown(interaction.user.id, guild_id)
+
+        log_claim(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            message_id=msg_id,
+            claimer_id=interaction.user.id,
+            claimer_name=interaction.user.display_name,
+            item_name=item_to_send,
+            platform=platform_to_send,
+            sharer_id=sharer_id,
+            sharer_name=sharer_name_db,
+        )
 
         await interaction.response.send_message(
             "The code has been sent to your DMs!", ephemeral=True
@@ -2130,6 +2293,93 @@ async def settings_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_settings_embed(interaction.guild.id),
         view=SettingsView(interaction.guild.id),
+        ephemeral=True,
+    )
+
+
+class ClaimLogView(discord.ui.View):
+    """Paginated ephemeral view for /claimlog."""
+
+    ENTRIES_PER_PAGE = 10
+
+    def __init__(self, entries: list, filter_desc: str = ""):
+        super().__init__(timeout=120)
+        self.entries      = entries
+        self.filter_desc  = filter_desc
+        self.page         = 0
+        self.total_pages  = max(
+            1, (len(entries) + self.ENTRIES_PER_PAGE - 1) // self.ENTRIES_PER_PAGE
+        )
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        self.prev_button.disabled = self.page == 0
+        self.next_button.disabled = self.page >= self.total_pages - 1
+
+    def current_embed(self) -> discord.Embed:
+        start = self.page * self.ENTRIES_PER_PAGE
+        return build_claimlog_embed(
+            entries=self.entries[start : start + self.ENTRIES_PER_PAGE],
+            page=self.page + 1,
+            total_pages=self.total_pages,
+            total_count=len(self.entries),
+            filter_desc=self.filter_desc,
+            page_start=start + 1,
+        )
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+
+@bot.tree.command(name="claimlog", description="View recent claim history for this server. Mod only.")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(
+    user="Filter by a specific member",
+    item="Filter by item name (partial match)",
+)
+async def claimlog_command(
+    interaction: discord.Interaction,
+    user: discord.Member | None = None,
+    item: str | None = None,
+):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Claim log is only available inside a server.", ephemeral=True
+        )
+        return
+    if not is_moderator(interaction.user):
+        await interaction.response.send_message(
+            "Only moderators can view the claim log.", ephemeral=True
+        )
+        return
+
+    entries = get_claim_log(
+        guild_id=interaction.guild.id,
+        limit=30,
+        claimer_id=user.id if user else None,
+        item_filter=item,
+    )
+
+    filter_parts = []
+    if user:
+        filter_parts.append(f"Claims by {user.display_name}")
+    if item:
+        filter_parts.append(f"Item: {item}")
+    filter_desc = " · ".join(filter_parts)
+
+    view = ClaimLogView(entries=entries, filter_desc=filter_desc)
+    await interaction.response.send_message(
+        embed=view.current_embed(),
+        view=view,
         ephemeral=True,
     )
 

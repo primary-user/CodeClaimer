@@ -1029,11 +1029,8 @@ class MathChallengeView(discord.ui.View):
                 conn.commit()
 
             if not won:
-                try:
-                    msg = await interaction.channel.fetch_message(self.message_id)
-                    await msg.edit(embed=build_already_claimed_embed(), view=None)
-                except Exception:
-                    pass
+                # Lost the race — winner already edited the card to Loot Claimed!
+                # Just notify this user ephemerally; don't touch the public card.
                 await interaction.response.send_message(
                     "Someone else claimed this code while you were answering.",
                     ephemeral=True,
@@ -1176,21 +1173,15 @@ class ClaimButtonView(discord.ui.View):
                 else (f"<@{sharer_id}>" if sharer_id else "Someone")
             )
         else:
-            # Stale card — clean it up
-            try:
-                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                print(f"[Claim] Could not clean up stale card {msg_id}: {exc}")
+            # Row is gone — code was already claimed or card is stale.
+            # Do NOT edit the public card; it may already show "Loot Claimed!".
             await interaction.response.send_message(
                 "This code has already been claimed!", ephemeral=True
             )
             return
 
         if not code_to_send:
-            try:
-                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                print(f"[Claim] Could not clean up empty card {msg_id}: {exc}")
+            # Same: don't overwrite a Loot Claimed! card.
             await interaction.response.send_message(
                 "This code has already been claimed!", ephemeral=True
             )
@@ -1325,11 +1316,8 @@ class ClaimButtonView(discord.ui.View):
             conn.commit()
 
         if not won:
-            # Lost the race — someone else claimed it first
-            try:
-                await interaction.message.edit(embed=build_already_claimed_embed(), view=None)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
+            # Lost the race — winner already edited the card to Loot Claimed!
+            # Just notify this user ephemerally; don't touch the public card.
             await interaction.response.send_message(
                 "This code was just claimed by someone else!", ephemeral=True
             )

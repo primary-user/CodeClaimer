@@ -307,7 +307,7 @@ async def _complete_claim(interaction: discord.Interaction, row: dict, settings:
 async def handle_show_my_code(interaction: discord.Interaction) -> None:
     mine = db.get_claim_for_user(interaction.message.id, interaction.user.id)
     if not mine:
-        await interaction.response.send_message("Only the person who claimed this code can see it.", ephemeral=True)
+        await interaction.response.send_message("Only the person who claimed or won this can see the code.", ephemeral=True)
         return
     if not mine.get("product_code"):
         await interaction.response.send_message(
@@ -337,8 +337,11 @@ async def mark_expired(row: dict) -> None:
 async def withdraw(interaction: discord.Interaction, message: discord.Message) -> None:
     row = db.get_code(message.id)
     if row is None:
+        import raffle
+        if await raffle.withdraw(interaction, message):
+            return
         await interaction.response.send_message(
-            "That message isn't an unclaimed CodeClaimer drop.", ephemeral=True,
+            "That message isn't an unclaimed CodeClaimer drop or an open raffle.", ephemeral=True,
         )
         return
     is_sharer = row.get("sharer_id") == interaction.user.id
@@ -375,6 +378,8 @@ async def withdraw(interaction: discord.Interaction, message: discord.Message) -
 async def on_card_deleted(message_id: int) -> None:
     gone = db.delete_code(message_id)
     if gone is None:
+        import raffle
+        await raffle.on_card_deleted(message_id)
         return
     returned = await _return_to_sharer(_bot, gone, reason="The card was deleted")
     log.info("Card deleted msg=%d guild=%s code returned=%s", message_id, gone.get("guild_id"),

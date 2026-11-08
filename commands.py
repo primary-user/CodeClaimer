@@ -468,8 +468,12 @@ def help_panel() -> ui.LayoutView:
             "each member gets one code per drop."
         ),
         ui.TextDisplay(
+            "**/raffle**\nRaffle one or more codes. Members press Enter, and when time is up winners are "
+            "picked at random, one code each. Winners get pinged and see their code privately."
+        ),
+        ui.TextDisplay(
             "**Withdraw code**\nRight click a card (long press on mobile), then **Apps → Withdraw code**. "
-            "The sharer gets the code back. Mods can withdraw any drop."
+            "Works on raffles too. The sharer gets the codes back. Mods can withdraw any drop."
         ),
         ui.TextDisplay(
             "**/settings** and **/claimlog** (mods)\nChoose who can share and claim, add a claim challenge "
@@ -496,6 +500,17 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(view=help_panel(), ephemeral=True)
 
 # ---------------------------------------------------------------------------
+# /raffle
+# ---------------------------------------------------------------------------
+
+@app_commands.command(name="raffle", description="Raffle one or more codes. Members enter, winners are drawn at random.")
+@app_commands.guild_only()
+async def raffle_cmd(interaction: discord.Interaction):
+    import raffle
+    await raffle.raffle_command(interaction)
+
+
+# ---------------------------------------------------------------------------
 # Withdraw code (message command)
 # ---------------------------------------------------------------------------
 
@@ -505,4 +520,4 @@ async def withdraw_code(interaction: discord.Interaction, message: discord.Messa
     await claims.withdraw(interaction, message)
 
 
-ALL_COMMANDS = [sharecode, bulkshare, settings_command, claimlog, help_command, withdraw_code]
+ALL_COMMANDS = [sharecode, bulkshare, raffle_cmd, settings_command, claimlog, help_command, withdraw_code]

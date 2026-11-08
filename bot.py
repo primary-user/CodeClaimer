@@ -8,6 +8,7 @@ router, and the background loops. Feature code lives in:
   challenges.py  claim challenges
   cards.py       what members see (cards, reveal, DM receipt)
   claims.py      posting drops and the claim flow
+  raffle.py      raffle drops, entries and the draw
   commands.py    slash commands and panels
 """
 import asyncio
@@ -22,6 +23,7 @@ from discord.ext import commands, tasks
 import cards
 import claims
 import db
+import raffle
 from commands import ALL_COMMANDS
 from parsing import is_expired
 
@@ -49,6 +51,8 @@ class CodeBot(commands.Bot):
     async def setup_hook(self):
         db.backup_db()
         db.init_db()
+        raffle.init_tables()
+        raffle.recover_stuck()
         claims.bind(self)
         self.http_session = aiohttp.ClientSession()
         for cmd in ALL_COMMANDS:
@@ -78,6 +82,8 @@ bot = CodeBot()
 ROUTES = {
     cards.CLAIM_CUSTOM_ID:  claims.handle_claim_click,
     cards.MYCODE_CUSTOM_ID: claims.handle_show_my_code,
+    raffle.ENTER_CUSTOM_ID: raffle.handle_enter,
+    raffle.HOST_CUSTOM_ID:  raffle.handle_host_leftovers,
 }
 
 
@@ -192,6 +198,7 @@ async def on_ready():
     for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats):
         if not loop.is_running():
             loop.start()
+    raffle.start(bot)
 
 
 @bot.event

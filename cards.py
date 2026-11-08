@@ -142,13 +142,14 @@ def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention:
     return view
 
 
-def v2_claimed_card(item_name: str, platform: str, claimer: str, sharer: str) -> ui.LayoutView:
+def v2_claimed_card(item_name: str, platform: str, claimer: str, sharer: str,
+                    claimed_ts: int | None = None) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
         *tile_section([
             "-# CLAIMED",
             f"### {item_label(item_name, platform)}\n"
-            f"Claimed by **{claimer}** <t:{_now_ts()}:R>. Thanks to **{sharer}** for sharing.",
+            f"Claimed by **{claimer}** <t:{claimed_ts or _now_ts()}:R>. Thanks to **{sharer}** for sharing.",
         ], TILE_CLAIMED, "Claw took the gift"),
         ui.Separator(),
         ui.ActionRow(

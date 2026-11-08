@@ -9,6 +9,7 @@ router, and the background loops. Feature code lives in:
   cards.py       what members see (cards, reveal, DM receipt)
   claims.py      posting drops and the claim flow
   raffle.py      raffle drops, entries and the draw
+  refresh.py     one time redraw of pre v2 cards
   commands.py    slash commands and panels
 """
 import asyncio
@@ -24,6 +25,7 @@ import cards
 import claims
 import db
 import raffle
+import refresh
 from commands import ALL_COMMANDS
 from parsing import is_expired
 
@@ -53,6 +55,7 @@ class CodeBot(commands.Bot):
         db.init_db()
         raffle.init_tables()
         raffle.recover_stuck()
+        refresh.init_table()
         claims.bind(self)
         self.http_session = aiohttp.ClientSession()
         for cmd in ALL_COMMANDS:
@@ -199,6 +202,7 @@ async def on_ready():
         if not loop.is_running():
             loop.start()
     raffle.start(bot)
+    asyncio.create_task(refresh.run(bot))
 
 
 @bot.event

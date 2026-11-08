@@ -144,15 +144,14 @@ def open_card(r: dict, codes: list[dict], entries: int, challenge: bool) -> ui.L
         body += f"\n{_prize_lines(codes)}"
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        ui.TextDisplay(head),
-        ui.TextDisplay(body),
+        *cards.tile_section([head, body], cards.TILE_LIVE, "Claw reaching for a gift"),
         ui.TextDisplay(f"Draw <t:{ends}:R>  ·  **{entries}** entered"),
         ui.TextDisplay(f"-# Hosted by <@{r['host_id']}>. Winners are picked at random and see their code privately."),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Enter", style=discord.ButtonStyle.success, custom_id=ENTER_CUSTOM_ID, emoji="🎟️"),
-            cards.invite_button(),
         ),
+        ui.TextDisplay(cards.INVITE_LINE),
         accent_color=cards.SKY,
     ))
     return view
@@ -175,14 +174,15 @@ def ended_card(r: dict, codes: list[dict], entries: int) -> ui.LayoutView:
     if leftovers:
         row.append(ui.Button(label="Host: unused codes", style=discord.ButtonStyle.secondary,
                              custom_id=HOST_CUSTOM_ID))
-    row.append(cards.invite_button())
+    tile = cards.TILE_CLAIMED if winners else cards.TILE_EMPTY
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        ui.TextDisplay(f"-# RAFFLE ENDED  ·  {entries} ENTERED"),
-        ui.TextDisplay(f"## {title}\n{body}"),
+        *cards.tile_section([f"-# RAFFLE ENDED  ·  {entries} ENTERED", f"## {title}\n{body}"], tile,
+                            "Claw took the gift" if winners else "Empty claw"),
         ui.TextDisplay(foot),
         ui.Separator(),
-        ui.ActionRow(*row),
+        *([ui.ActionRow(*row)] if row else []),
+        ui.TextDisplay(cards.INVITE_LINE),
         accent_color=cards.NAVY,
     ))
     return view
@@ -192,10 +192,11 @@ def cancelled_card(r: dict, codes: list[dict]) -> ui.LayoutView:
     title = r["title"] or (cards.item_label(codes[0]["item_name"], codes[0]["platform"]) if codes else "Raffle")
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        ui.TextDisplay("-# RAFFLE CANCELLED"),
-        ui.TextDisplay(f"### {title}\nThe host called this one off. The codes went back to them."),
+        *cards.tile_section(["-# RAFFLE CANCELLED",
+                             f"### {title}\nThe host called this one off. The codes went back to them."],
+                            cards.TILE_EMPTY, "Empty claw"),
         ui.Separator(),
-        ui.ActionRow(cards.invite_button()),
+        ui.TextDisplay(cards.INVITE_LINE),
         accent_color=cards.SLATE,
     ))
     return view
@@ -533,7 +534,7 @@ async def draw(raffle_id: int) -> None:
                 await user.send(embed=cards.dm_receipt_embed(
                     code["item_name"], code["platform"], code["product_code"], code["expires_at"],
                     guild.name if guild else None, r["host_name"], raffle=True,
-                ), view=cards.dm_receipt_view())
+                ))
             except discord.HTTPException:
                 pass
             await asyncio.sleep(0.3)

@@ -285,7 +285,7 @@ async def _complete_claim(interaction: discord.Interaction, row: dict, settings:
         await interaction.user.send(embed=cards.dm_receipt_embed(
             won["item_name"], won.get("platform") or "", won["product_code"], won.get("expires_at") or "",
             interaction.guild.name if interaction.guild else None, won.get("sharer_name"),
-        ), view=cards.dm_receipt_view())
+        ))
         dm_ok = True
     except (discord.Forbidden, discord.HTTPException):
         dm_ok = False

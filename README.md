@@ -24,6 +24,7 @@ Share spare game keys and codes without posting them in public. A code stays hid
 - **One claim per bulk drop**, **role gate** and **per member cooldown**, all enforced in a single database transaction.
 - **Withdraw code.** Right click a card, then Apps, then Withdraw code. Works on raffles too. The code goes back to the sharer. Deleted cards return the code as well.
 - **Expiration.** A date (`12/31/2026`) or a length (`24h`, `7d`, `2w`). Cards show a live countdown and lock when time is up.
+- **Animated claw tiles.** Each card shows the brand claw for its state: a light tile that teases the gift while live, a navy tile where the claw takes the gift and a check lands once claimed, and a grey empty claw when expired or withdrawn.
 - **Link blocking** in every field.
 - **Claim log** for mods, including raffle wins.
 
@@ -75,6 +76,8 @@ Challenge modes: Easy, Medium, Hard, Difficulty Over Time, Periodic Table, Rando
 | `commands.py` | Slash commands and panels |
 | `challenges.py` | Claim challenge generators |
 | `parsing.py` | Input cleaning, link blocking, expirations, bulk format |
+| `assets/` | Claw tiles, served to Discord through jsDelivr |
+| `tools/build_claw.py` | Rebuilds the claw tiles from `assets/codeclaimer_icon.jpg` |
 
 ## Running it
 
@@ -85,6 +88,7 @@ Railway, one worker, a volume mounted at `/app/data`.
 | `DISCORD_TOKEN` | Bot token |
 | `DB_PATH` | `/app/data/codes.db` on Railway |
 | `TOPGG_TOKEN` | Optional. Posts the server count to Top.gg |
+| `CLAW_TILES` | Optional. `0` hides the claw tiles |
 
 On every boot the database is copied to `data/backups/` (newest 2 kept) before migrations run. Migrations only add tables and columns, so cards posted by any earlier version keep working.
 

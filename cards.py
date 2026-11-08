@@ -9,10 +9,11 @@ Two card styles live side by side:
   v2      Components V2 cards. Swiss layout: small uppercase label, big item
           name, one fact line, buttons. Accent bar in the claw icon's blues.
 
-Every card carries an Add to your server link, so each drop doubles as an
-invite for anyone who sees it.
+Every card ends with a small Add CodeClaimer link and an animated claw tile
+for its state (live, claimed, empty).
 """
 import logging
+import os
 import random
 from datetime import datetime, timezone
 
@@ -69,8 +70,35 @@ def _now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
+# ---------------------------------------------------------------------------
+# Claw tiles
+# ---------------------------------------------------------------------------
+# Animated thumbnails built by tools/build_claw.py from the brand icon. They are
+# served from the public repo through jsDelivr, so servers need no Attach Files
+# permission and nothing is uploaded per card. New art gets a new file name
+# (v2, v3...) because the CDN caches by name. CLAW_TILES=0 turns them off.
+
+ASSET_BASE = os.getenv("CLAW_ASSET_BASE",
+                       "https://cdn.jsdelivr.net/gh/primary-user/CodeClaimer@main/assets").rstrip("/")
+TILES_ON = os.getenv("CLAW_TILES", "1") != "0"
+TILE_LIVE    = f"{ASSET_BASE}/claw-live-v1.gif"
+TILE_CLAIMED = f"{ASSET_BASE}/claw-claimed-v1.gif"
+TILE_EMPTY   = f"{ASSET_BASE}/claw-empty-v1.png"
+
+INVITE_LINE = f"-# [Add CodeClaimer to your server]({INVITE_URL})"
+
+
 def invite_button(label: str = "Add to your server") -> ui.Button:
+    """Big link button. Only used on /help; cards use INVITE_LINE instead."""
     return ui.Button(label=label, style=discord.ButtonStyle.link, url=INVITE_URL)
+
+
+def tile_section(texts: list[str], tile: str, alt: str):
+    """Text on the left, claw tile on the right. Plain text when tiles are off."""
+    displays = [ui.TextDisplay(t) for t in texts[:3]]
+    if not TILES_ON:
+        return displays
+    return [ui.Section(*displays, accessory=ui.Thumbnail(tile, description=alt))]
 
 
 # ---------------------------------------------------------------------------
@@ -100,15 +128,14 @@ def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention:
     if facts:
         body += f"\n{facts}"
     view.add_item(ui.Container(
-        ui.TextDisplay(head),
-        ui.TextDisplay(body),
+        *tile_section([head, body], TILE_LIVE, "Claw reaching for a gift"),
         ui.TextDisplay(f"-# Shared by {sharer_mention}. The code only shows to whoever claims it."),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Claim code", style=discord.ButtonStyle.success, custom_id=CLAIM_CUSTOM_ID,
                       emoji="🎁"),
-            invite_button(),
         ),
+        ui.TextDisplay(INVITE_LINE),
         accent_color=SKY,
     ))
     return view
@@ -117,14 +144,16 @@ def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention:
 def v2_claimed_card(item_name: str, platform: str, claimer: str, sharer: str) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        ui.TextDisplay("-# CLAIMED"),
-        ui.TextDisplay(f"### {item_label(item_name, platform)}\n"
-                       f"Claimed by **{claimer}** <t:{_now_ts()}:R>. Thanks to **{sharer}** for sharing."),
+        *tile_section([
+            "-# CLAIMED",
+            f"### {item_label(item_name, platform)}\n"
+            f"Claimed by **{claimer}** <t:{_now_ts()}:R>. Thanks to **{sharer}** for sharing.",
+        ], TILE_CLAIMED, "Claw took the gift"),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Show my code", style=discord.ButtonStyle.secondary, custom_id=MYCODE_CUSTOM_ID),
-            invite_button(),
         ),
+        ui.TextDisplay(INVITE_LINE),
         accent_color=NAVY,
     ))
     return view
@@ -139,10 +168,10 @@ def v2_final_card(item_name: str, platform: str, state: str, expires_at: str = "
         label, line = "WITHDRAWN", "The sharer took this code back."
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        ui.TextDisplay(f"-# {label}"),
-        ui.TextDisplay(f"### {item_label(item_name, platform)}\n{line}"),
+        *tile_section([f"-# {label}", f"### {item_label(item_name, platform)}\n{line}"],
+                      TILE_EMPTY, "Empty claw"),
         ui.Separator(),
-        ui.ActionRow(invite_button()),
+        ui.TextDisplay(INVITE_LINE),
         accent_color=SLATE,
     ))
     return view
@@ -152,42 +181,47 @@ def v2_final_card(item_name: str, platform: str, state: str, expires_at: str = "
 # Legacy embed states (fallback for cards posted before v2)
 # ---------------------------------------------------------------------------
 
+def _legacy_tile(embed: discord.Embed, tile: str) -> discord.Embed:
+    if TILES_ON:
+        embed.set_thumbnail(url=tile)
+    return embed
+
+
 def legacy_claimed_embed(item_name: str, platform: str, claimer: str, sharer: str) -> discord.Embed:
-    return discord.Embed(
+    return _legacy_tile(discord.Embed(
         title="Loot Claimed!",
         description=(f"The code for **{item_label(item_name, platform)}** was claimed by **{claimer}**.\n\n"
-                     f"Thanks to {sharer} for sharing with the community!"),
+                     f"Thanks to {sharer} for sharing with the community!\n{INVITE_LINE}"),
         color=NAVY,
-    )
+    ), TILE_CLAIMED)
 
 
 def legacy_claimed_view() -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(label="Show my code", style=discord.ButtonStyle.secondary,
                                     custom_id=MYCODE_CUSTOM_ID))
-    view.add_item(discord.ui.Button(label="Add to your server", style=discord.ButtonStyle.link, url=INVITE_URL))
     return view
 
 
 def legacy_final_embed(item_name: str, platform: str, state: str, expires_at: str = "") -> discord.Embed:
     if state == "expired":
-        return discord.Embed(
+        return _legacy_tile(discord.Embed(
             title="Code Expired",
             description=(f"The code for **{item_label(item_name, platform)}** expired before anyone claimed it.\n\n"
-                         f"**Expired:** {expiry_text(expires_at)}"),
+                         f"**Expired:** {expiry_text(expires_at)}\n{INVITE_LINE}"),
             color=SLATE,
-        )
-    return discord.Embed(
+        ), TILE_EMPTY)
+    return _legacy_tile(discord.Embed(
         title="Code Withdrawn",
-        description=f"The code for **{item_label(item_name, platform)}** was taken back before anyone claimed it.",
+        description=(f"The code for **{item_label(item_name, platform)}** was taken back before anyone "
+                     f"claimed it.\n{INVITE_LINE}"),
         color=SLATE,
-    )
+    ), TILE_EMPTY)
 
 
-def legacy_link_view() -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Add to your server", style=discord.ButtonStyle.link, url=INVITE_URL))
-    return view
+def legacy_link_view() -> None:
+    """Final legacy states carry no buttons; the invite is a text line."""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -210,23 +244,12 @@ def dm_receipt_embed(item_name: str, platform: str, code: str, expires_at: str,
     where = f" in **{guild_name}**" if guild_name else ""
     by = f" Shared by {sharer}." if sharer else ""
     how = "You won this in a raffle" if raffle else "You claimed this"
-    embed = discord.Embed(
-        title="🎁 Your code",
-        description=f"{how}{where}.{by}\n\n**{item_label(item_name, platform)}**\n```\n{code}\n```",
-        color=NAVY,
-    )
+    desc = f"{how}{where}.{by}\n\n**{item_label(item_name, platform)}**\n```\n{code}\n```"
     if clean_expiration(expires_at):
-        embed.add_field(name="Redeem before", value=expiry_text(expires_at), inline=False)
-    embed.set_footer(text="CodeClaimer · private code drops for Discord")
-    return embed
-
-
-def dm_receipt_view() -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Add CodeClaimer to your server", style=discord.ButtonStyle.link,
-                                    url=INVITE_URL))
-    view.add_item(discord.ui.Button(label="Vote on Top.gg", style=discord.ButtonStyle.link, url=VOTE_URL))
-    return view
+        desc += f"\n**Redeem before** {expiry_text(expires_at)}\n"
+    desc += f"\n-# [Add CodeClaimer to your server]({INVITE_URL})  ·  [Vote on Top.gg]({VOTE_URL})"
+    embed = discord.Embed(title="🎁 Your code", description=desc, color=NAVY)
+    return _legacy_tile(embed, TILE_CLAIMED)
 
 
 # ---------------------------------------------------------------------------

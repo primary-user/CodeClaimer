@@ -418,9 +418,10 @@ def _entry_result(raffle_id: int, user) -> str:
     return "This raffle has closed."
 
 
-async def handle_enter(interaction: discord.Interaction) -> None:
+async def handle_enter(interaction: discord.Interaction, raffle_id: int | None = None) -> None:
+    """Enter from the raffle card, or from a closing soon post (raffle_id given)."""
     from claims import _lockouts, format_wait, is_moderator
-    r = get_raffle(interaction.message.id)
+    r = get_raffle(raffle_id or interaction.message.id)
     if not r or r["status"] != "open" or datetime.fromisoformat(r["ends_at"]) <= datetime.now(timezone.utc):
         await interaction.response.send_message("This raffle has closed. The draw is on its way.", ephemeral=True)
         return
@@ -510,6 +511,8 @@ async def draw(raffle_id: int) -> None:
 
     codes = raffle_codes(raffle_id)
     await _edit(r, ended_card(r, codes, len(entrants)))
+    import resurface
+    await resurface.on_raffle_closed(r)
     log.info("Raffle drawn guild=%s msg=%d entries=%d winners=%d leftovers=%d",
              r["guild_id"], raffle_id, len(entrants), len(pairs), len(codes) - len(pairs))
 
@@ -570,6 +573,8 @@ async def cancel(raffle_id: int) -> dict | None:
         conn.execute("UPDATE raffle_codes SET returned = 1 WHERE raffle_id = ?", (raffle_id,))
         conn.commit()
     log.info("Raffle cancelled guild=%s msg=%d", r["guild_id"], raffle_id)
+    import resurface
+    await resurface.on_raffle_closed(r)
     return r
 
 

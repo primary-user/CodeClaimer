@@ -25,6 +25,9 @@ Share spare game keys and codes without posting them in public. A code stays hid
 - **Withdraw code.** Right click a card, then Apps, then Withdraw code. Works on raffles too. The code goes back to the sharer. Deleted cards return the code as well.
 - **Expiration.** A date (`12/31/2026`) or a length (`24h`, `7d`, `2w`). Cards show a live countdown and lock when time is up.
 - **Animated claw tiles.** Each card shows the brand claw for its state: a light tile that teases the gift while live, a navy tile where the claw takes the gift and a check lands once claimed, and a grey empty claw when expired or withdrawn.
+- **Resurfacing (mods only, off by default).** Mods pick channels in /settings > Resurfacing. When codes get buried, one small roundup card lists the 5 expiring soonest with a claim menu and a private Browse all list. Triggered by chat activity (Light, Standard, Busy) and or a fixed schedule (48 hours, 7, 14 or 30 days). Roundups over 25 codes can wait for a mod's Approve in a mod updates channel. Codes only resurface in the channel they were posted in.
+- **Last call and raffle closing soon** posts in resurfacing channels.
+- **60 day cleanup (off by default).** Deletes old unclaimed cards and DMs each code back to its sharer.
 - **Link blocking** in every field.
 - **Claim log** for mods, including raffle wins.
 
@@ -73,6 +76,8 @@ Challenge modes: Easy, Medium, Hard, Difficulty Over Time, Periodic Table, Rando
 | `cards.py` | Components V2 cards, private reveal, DM receipt |
 | `claims.py` | Posting drops, claim flow, withdraw, deleted cards |
 | `raffle.py` | Raffle form, entries, draw loop, cancel |
+| `resurface.py` | Roundups, Browse all, approvals, last call, raffle reminders, 60 day cleanup |
+| `refresh.py` | One time redraw of pre v2 cards |
 | `commands.py` | Slash commands and panels |
 | `challenges.py` | Claim challenge generators |
 | `parsing.py` | Input cleaning, link blocking, expirations, bulk format |

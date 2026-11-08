@@ -10,6 +10,7 @@ router, and the background loops. Feature code lives in:
   claims.py      posting drops and the claim flow
   raffle.py      raffle drops, entries and the draw
   refresh.py     one time redraw of pre v2 cards
+  resurface.py   roundups, last call, raffle reminders, 60 day cleanup
   commands.py    slash commands and panels
 """
 import asyncio
@@ -26,6 +27,7 @@ import claims
 import db
 import raffle
 import refresh
+import resurface
 from commands import ALL_COMMANDS
 from parsing import is_expired
 
@@ -56,6 +58,7 @@ class CodeBot(commands.Bot):
         raffle.init_tables()
         raffle.recover_stuck()
         refresh.init_table()
+        resurface.init_tables()
         claims.bind(self)
         self.http_session = aiohttp.ClientSession()
         for cmd in ALL_COMMANDS:
@@ -87,7 +90,17 @@ ROUTES = {
     cards.MYCODE_CUSTOM_ID: claims.handle_show_my_code,
     raffle.ENTER_CUSTOM_ID: raffle.handle_enter,
     raffle.HOST_CUSTOM_ID:  raffle.handle_host_leftovers,
+    resurface.PICK_ID:      resurface.handle_pick,
 }
+
+# custom_id prefix -> handler(interaction, suffix). The suffix carries an id.
+PREFIX_ROUTES = [
+    ("cc:raffle:enter:",          lambda i, x: raffle.handle_enter(i, int(x))),
+    (resurface.CLAIMREF_PREFIX,   resurface.handle_claim_ref),
+    (resurface.BROWSE_PREFIX,     resurface.handle_browse),
+    (resurface.APPROVE_PREFIX,    lambda i, x: resurface.handle_approval(i, x, True)),
+    (resurface.SKIP_PREFIX,       lambda i, x: resurface.handle_approval(i, x, False)),
+]
 
 
 @bot.event
@@ -96,6 +109,12 @@ async def on_interaction(interaction: discord.Interaction):
         return
     custom_id = (interaction.data or {}).get("custom_id", "")
     handler = ROUTES.get(custom_id)
+    if handler is None:
+        for prefix, fn in PREFIX_ROUTES:
+            if custom_id.startswith(prefix):
+                suffix = custom_id[len(prefix):]
+                handler = lambda i, fn=fn, suffix=suffix: fn(i, suffix)  # noqa: E731
+                break
     if handler is None:
         return
     try:
@@ -202,6 +221,7 @@ async def on_ready():
         if not loop.is_running():
             loop.start()
     raffle.start(bot)
+    resurface.start(bot)
     asyncio.create_task(refresh.run(bot))
 
 
@@ -216,6 +236,11 @@ async def on_guild_join(guild: discord.Guild):
 async def on_guild_remove(guild: discord.Guild):
     log.info("Left guild=%d name=%r members=%s live_codes=%d total_guilds=%d",
              guild.id, guild.name, guild.member_count, db.live_codes_in_guild(guild.id), len(bot.guilds))
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    resurface.on_message(message)
 
 
 @bot.event

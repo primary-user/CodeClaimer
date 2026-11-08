@@ -257,13 +257,17 @@ async def _mod_check(interaction: discord.Interaction) -> bool:
 class SettingsPanel(ui.LayoutView):
     """One ephemeral panel. Every control redraws the panel in place."""
 
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, tab: str = "drops"):
         super().__init__(timeout=600)
         self.guild_id = guild_id
+        self.tab = tab
         s = db.get_settings(guild_id)
+        if tab == "resurface":
+            self.add_item(ui.Container(*self._resurface_parts(s), accent_color=cards.SKY))
+            return
         mode = s["verification_mode"]
         parts: list = [
-            ui.TextDisplay("-# SETTINGS"),
+            self._tabs(),
             ui.TextDisplay("## CodeClaimer\nHow drops work in this server. Changes save instantly."),
             ui.Separator(spacing=discord.SeparatorSpacing.large),
         ]
@@ -325,8 +329,171 @@ class SettingsPanel(ui.LayoutView):
         parts.append(_footer_links())
         self.add_item(ui.Container(*parts, accent_color=cards.SKY))
 
+    # -- tabs ------------------------------------------------------------
+
+    def _tabs(self) -> ui.ActionRow:
+        drops = ui.Button(label="Drops", style=discord.ButtonStyle.primary if self.tab == "drops"
+                          else discord.ButtonStyle.secondary, disabled=self.tab == "drops")
+        resur = ui.Button(label="Resurfacing and cleanup", style=discord.ButtonStyle.primary
+                          if self.tab == "resurface" else discord.ButtonStyle.secondary,
+                          disabled=self.tab == "resurface")
+
+        async def go_drops(interaction: discord.Interaction):
+            if await _mod_check(interaction):
+                await interaction.response.edit_message(view=SettingsPanel(self.guild_id, "drops"))
+
+        async def go_resur(interaction: discord.Interaction):
+            if await _mod_check(interaction):
+                await interaction.response.edit_message(view=SettingsPanel(self.guild_id, "resurface"))
+        drops.callback, resur.callback = go_drops, go_resur
+        return ui.ActionRow(drops, resur)
+
+    # -- resurfacing tab ----------------------------------------------------
+
+    def _resurface_parts(self, s: dict) -> list:
+        import resurface as rs
+        chans = s["resurface_channels"]
+        parts: list = [
+            self._tabs(),
+            ui.TextDisplay("## Resurfacing\nBring buried codes back in busy channels. Only the channels you pick "
+                           "are touched, and codes only come back in the channel they were posted in."),
+        ]
+        ch_select = ui.ChannelSelect(
+            placeholder="Pick channels, or clear to turn resurfacing off", min_values=0, max_values=25,
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news,
+                           discord.ChannelType.public_thread, discord.ChannelType.private_thread],
+            default_values=[discord.Object(id=c) for c in chans[:25]])
+        ch_select.callback = self._channels_cb
+        parts.append(ui.TextDisplay("**Channels**\n" + (" ".join(f"<#{c}>" for c in chans) if chans
+                                                       else "**None.** Resurfacing is off until you pick channels.")))
+        parts.append(ui.ActionRow(ch_select))
+
+        act = s["resurface_activity"]
+        act_sel = ui.Select(placeholder=f"Chat activity: {act.title()}", options=[
+            discord.SelectOption(label=k.title(), value=k, description=v.split(" · ", 1)[-1][:100] if k != "off"
+                                 else "No activity roundups", default=k == act)
+            for k, v in rs.PRESET_LABELS.items()])
+        act_sel.callback = self._activity_cb
+        parts.append(ui.TextDisplay("**Chat activity**\n" + rs.PRESET_LABELS.get(act, "Off")))
+        parts.append(ui.ActionRow(act_sel))
+
+        sch = s["resurface_schedule"]
+        sch_sel = ui.Select(placeholder=f"Schedule: {rs.SCHEDULE_LABELS.get(sch, 'Off')}", options=[
+            discord.SelectOption(label=v, value=k, default=k == sch) for k, v in rs.SCHEDULE_LABELS.items()])
+        sch_sel.callback = self._schedule_cb
+        parts.append(ui.TextDisplay("**Fixed schedule**\n" + rs.SCHEDULE_LABELS.get(sch, "Off")
+                                    + (". Skipped if nobody has posted since the last roundup." if sch != "off" else "")))
+        parts.append(ui.ActionRow(sch_sel))
+
+        parts.append(self._toggle_section(
+            "Last call before expiry",
+            "**On.** One post about 24 hours before a code expires, 1 hour for short codes." if s["last_call"]
+            else "**Off.**", "last_call", s["last_call"], tab="resurface"))
+        parts.append(self._toggle_section(
+            "Raffle closing soon",
+            "**On.** One post an hour before each draw." if s["raffle_reminder"] else "**Off.**",
+            "raffle_reminder", s["raffle_reminder"], tab="resurface"))
+
+        mod_ch = s["mod_channel_id"]
+        mod_sel = ui.ChannelSelect(
+            placeholder="Mod updates channel (optional)", min_values=0, max_values=1,
+            channel_types=[discord.ChannelType.text, discord.ChannelType.private_thread],
+            default_values=[discord.Object(id=mod_ch)] if mod_ch else [])
+        mod_sel.callback = self._modch_cb
+        parts.append(ui.TextDisplay(f"**Mod updates channel**\nRoundups over {rs.APPROVAL_THRESHOLD} codes "
+                                    + (f"wait for a mod's Approve in <#{mod_ch}>." if mod_ch
+                                       else "post on their own. Pick a mods only channel to approve them first.")))
+        parts.append(ui.ActionRow(mod_sel))
+
+        now_btn = ui.Button(label="Preview", style=discord.ButtonStyle.secondary)
+        now_btn.callback = self._roundup_now_cb
+        parts.append(ui.Section(ui.TextDisplay("**Post a roundup now**\nSee what's open first, then decide."),
+                                accessory=now_btn))
+
+        parts.append(ui.Separator())
+        clean_btn = ui.Button(label="Turn off" if s["cleanup_60d"] else "Turn on",
+                              style=discord.ButtonStyle.secondary if s["cleanup_60d"] else discord.ButtonStyle.primary)
+        clean_btn.callback = self._cleanup_toggle_cb
+        parts.append(ui.Section(ui.TextDisplay(
+            f"**Clear codes older than {rs.CLEANUP_DAYS} days**\n" +
+            ("**On.** Checked every few hours. Cards are deleted and codes go back to the sharer by DM."
+             if s["cleanup_60d"] else "**Off.** When on, old unclaimed cards are deleted and codes go back to the "
+                                      "sharer by DM.")), accessory=clean_btn))
+        clear_btn = ui.Button(label="Clear now", style=discord.ButtonStyle.secondary)
+        clear_btn.callback = self._clear_now_cb
+        parts.append(ui.Section(ui.TextDisplay("**Clear now**\nOne time cleanup. Shows a preview first."),
+                                accessory=clear_btn))
+        parts.append(_footer_links())
+        return parts
+
+    async def _resurface_change(self, interaction: discord.Interaction, column: str, value) -> None:
+        import resurface as rs
+        if not await _mod_check(interaction):
+            return
+        before_s = db.get_settings(self.guild_id)
+        before = rs.effective_channels(before_s)
+        db.set_setting(self.guild_id, column, value)
+        after_s = db.get_settings(self.guild_id)
+        after = rs.effective_channels(after_s)
+        new = sorted(after - before)
+        rs.arm_channels(self.guild_id, after_s["resurface_channels"])
+        rs.refresh_enabled()
+        log.info("Setting changed guild=%d %s=%s", self.guild_id, column, value)
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id, "resurface"))
+        if new and rs.backlog_lines(new):
+            await interaction.followup.send(
+                view=rs.RoundupPreview(self.guild_id, new, revert={column: before_s[column]}), ephemeral=True)
+
+    async def _channels_cb(self, interaction: discord.Interaction):
+        await self._resurface_change(interaction, "resurface_channels",
+                                     [int(v) for v in interaction.data.get("values", [])])
+
+    async def _activity_cb(self, interaction: discord.Interaction):
+        await self._resurface_change(interaction, "resurface_activity", interaction.data["values"][0])
+
+    async def _schedule_cb(self, interaction: discord.Interaction):
+        await self._resurface_change(interaction, "resurface_schedule", interaction.data["values"][0])
+
+    async def _modch_cb(self, interaction: discord.Interaction):
+        if not await _mod_check(interaction):
+            return
+        vals = interaction.data.get("values", [])
+        db.set_setting(self.guild_id, "mod_channel_id", int(vals[0]) if vals else 0)
+        log.info("Setting changed guild=%d mod_channel_id=%s", self.guild_id, vals[0] if vals else 0)
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id, "resurface"))
+
+    async def _roundup_now_cb(self, interaction: discord.Interaction):
+        import resurface as rs
+        if not await _mod_check(interaction):
+            return
+        chans = db.get_settings(self.guild_id)["resurface_channels"]
+        if not chans:
+            await interaction.response.send_message("Pick at least one channel first.", ephemeral=True)
+            return
+        await interaction.response.send_message(view=rs.RoundupPreview(self.guild_id, chans, revert=None),
+                                                ephemeral=True)
+
+    async def _cleanup_toggle_cb(self, interaction: discord.Interaction):
+        import resurface as rs
+        if not await _mod_check(interaction):
+            return
+        if db.get_settings(self.guild_id)["cleanup_60d"]:
+            db.set_setting(self.guild_id, "cleanup_60d", 0)
+            log.info("Setting changed guild=%d cleanup_60d=0", self.guild_id)
+            await interaction.response.edit_message(view=SettingsPanel(self.guild_id, "resurface"))
+            return
+        await interaction.response.send_message(view=rs.CleanupPreview(self.guild_id, turn_on=True), ephemeral=True)
+
+    async def _clear_now_cb(self, interaction: discord.Interaction):
+        import resurface as rs
+        if not await _mod_check(interaction):
+            return
+        await interaction.response.send_message(view=rs.CleanupPreview(self.guild_id, turn_on=False), ephemeral=True)
+
+    # -- shared -------------------------------------------------------------
+
     def _toggle_section(self, title: str, text: str, column: str, on: bool,
-                        on_label: str = "Turn off", off_label: str = "Turn on") -> ui.Section:
+                        on_label: str = "Turn off", off_label: str = "Turn on", tab: str = "drops") -> ui.Section:
         btn = ui.Button(label=on_label if on else off_label,
                         style=discord.ButtonStyle.secondary if on else discord.ButtonStyle.primary)
 
@@ -336,7 +503,7 @@ class SettingsPanel(ui.LayoutView):
             current = db.get_settings(self.guild_id)[column]
             db.set_setting(self.guild_id, column, 0 if current else 1)
             log.info("Setting changed guild=%d %s=%s", self.guild_id, column, 0 if current else 1)
-            await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
+            await interaction.response.edit_message(view=SettingsPanel(self.guild_id, tab))
         btn.callback = cb
         return ui.Section(ui.TextDisplay(f"**{title}**\n{text}"), accessory=btn)
 
@@ -477,7 +644,8 @@ def help_panel() -> ui.LayoutView:
         ),
         ui.TextDisplay(
             "**/settings** and **/claimlog** (mods)\nChoose who can share and claim, add a claim challenge "
-            "or cooldown, and see who claimed what."
+            "or cooldown, and see who claimed what. The Resurfacing tab brings buried codes back in the "
+            "channels you pick, and can clear codes older than 60 days."
         ),
         ui.Separator(),
         ui.TextDisplay(

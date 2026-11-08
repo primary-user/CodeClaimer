@@ -33,6 +33,14 @@ DEFAULT_SETTINGS = {
     "dot_start_seconds": 60,
     "claim_roles": "",
     "claim_cooldown_minutes": 0,
+    # Resurfacing (all inert until a mod picks channels). See resurface.py.
+    "resurface_channels": "",
+    "resurface_activity": "off",
+    "resurface_schedule": "off",
+    "last_call": 1,
+    "raffle_reminder": 1,
+    "mod_channel_id": 0,
+    "cleanup_60d": 0,
 }
 
 
@@ -164,6 +172,8 @@ def init_db() -> None:
             ("expires_at",  "TEXT NOT NULL DEFAULT ''"),
             ("batch_id",    "TEXT"),
             ("card_style",  "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("resurface_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_call_msg",   "INTEGER"),
         ])
         _add_columns(conn, "guild_settings", [
             ("one_claim_per_batch",    "INTEGER NOT NULL DEFAULT 1"),
@@ -172,6 +182,13 @@ def init_db() -> None:
             ("dot_start_seconds",      "INTEGER NOT NULL DEFAULT 60"),
             ("claim_roles",            "TEXT NOT NULL DEFAULT ''"),
             ("claim_cooldown_minutes", "INTEGER NOT NULL DEFAULT 0"),
+            ("resurface_channels",     "TEXT NOT NULL DEFAULT ''"),
+            ("resurface_activity",     "TEXT NOT NULL DEFAULT 'off'"),
+            ("resurface_schedule",     "TEXT NOT NULL DEFAULT 'off'"),
+            ("last_call",              "INTEGER NOT NULL DEFAULT 1"),
+            ("raffle_reminder",        "INTEGER NOT NULL DEFAULT 1"),
+            ("mod_channel_id",         "INTEGER NOT NULL DEFAULT 0"),
+            ("cleanup_60d",            "INTEGER NOT NULL DEFAULT 0"),
         ])
         # product_code is kept so the winner can see their code again from the
         # card. Mods never see it in /claimlog. expires_at is kept for the same
@@ -231,7 +248,9 @@ def get_settings(guild_id: int) -> dict:
         row = conn.execute(
             """
             SELECT mods_only, one_claim_per_batch, claim_verification,
-                   verification_mode, dot_start_seconds, claim_roles, claim_cooldown_minutes
+                   verification_mode, dot_start_seconds, claim_roles, claim_cooldown_minutes,
+                   resurface_channels, resurface_activity, resurface_schedule, last_call,
+                   raffle_reminder, mod_channel_id, cleanup_60d
             FROM guild_settings WHERE guild_id = ?
             """,
             (guild_id,),
@@ -239,12 +258,16 @@ def get_settings(guild_id: int) -> dict:
         if row is None:
             conn.execute(_INSERT_DEFAULTS, (guild_id,))
             conn.commit()
-            return dict(DEFAULT_SETTINGS)
+            s = dict(DEFAULT_SETTINGS)
+            s["claim_roles"], s["resurface_channels"] = [], []
+            return s
     s = dict(row)
-    try:
-        s["claim_roles"] = json.loads(s["claim_roles"]) if s["claim_roles"] else []
-    except (ValueError, TypeError):
-        s["claim_roles"] = []
+    for key in ("claim_roles", "resurface_channels"):
+        try:
+            s[key] = [int(x) for x in json.loads(s[key])] if s[key] else []
+        except (ValueError, TypeError):
+            s[key] = []
+    s["mod_channel_id"] = int(s["mod_channel_id"] or 0)
     s["dot_start_seconds"] = int(s["dot_start_seconds"] or 60)
     s["claim_cooldown_minutes"] = int(s["claim_cooldown_minutes"] or 0)
     return s
@@ -253,7 +276,7 @@ def get_settings(guild_id: int) -> dict:
 def set_setting(guild_id: int, column: str, value) -> None:
     if column not in _SETTING_COLUMNS:
         raise ValueError(f"Unknown setting {column}")
-    if column == "claim_roles":
+    if column in ("claim_roles", "resurface_channels"):
         value = json.dumps(value) if value else ""
     with get_db() as conn:
         conn.execute(_INSERT_DEFAULTS, (guild_id,))

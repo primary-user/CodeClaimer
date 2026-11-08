@@ -126,8 +126,9 @@ def check_gates(row: dict, member, settings: dict) -> str | None:
 # Claim button
 # ---------------------------------------------------------------------------
 
-async def handle_claim_click(interaction: discord.Interaction) -> None:
-    msg_id = interaction.message.id
+async def handle_claim_click(interaction: discord.Interaction, message_id: int | None = None) -> None:
+    """Claim from a card (message_id None) or from a roundup, Browse all or last call (message_id given)."""
+    msg_id = message_id or interaction.message.id
     row = db.get_code(msg_id)
     if row is None or not row.get("product_code"):
         # Already claimed or withdrawn. If this member is the one who claimed
@@ -302,6 +303,8 @@ async def _complete_claim(interaction: discord.Interaction, row: dict, settings:
     await cards.update_card_claimed(
         interaction.client, won, claimer_name=interaction.user.display_name,
     )
+    import resurface
+    await resurface.on_code_gone(won, "claimed", interaction.user.display_name)
 
 
 async def handle_show_my_code(interaction: discord.Interaction) -> None:
@@ -331,6 +334,8 @@ async def mark_expired(row: dict) -> None:
     if gone is None:
         return
     await cards.update_card_final(_bot, gone, state="expired")
+    import resurface
+    await resurface.on_code_gone(gone, "expired")
     log.info("Expired msg=%d guild=%s", row["message_id"], gone.get("guild_id"))
 
 
@@ -356,6 +361,8 @@ async def withdraw(interaction: discord.Interaction, message: discord.Message) -
         return
 
     await cards.update_card_final(interaction.client, gone, state="withdrawn")
+    import resurface
+    await resurface.on_code_gone(gone, "withdrawn")
     log.info("Withdrawn msg=%d guild=%s by=%d sharer=%s",
              message.id, gone.get("guild_id"), interaction.user.id, gone.get("sharer_id"))
 
@@ -381,6 +388,8 @@ async def on_card_deleted(message_id: int) -> None:
         import raffle
         await raffle.on_card_deleted(message_id)
         return
+    import resurface
+    await resurface.on_code_gone(gone, "deleted")
     returned = await _return_to_sharer(_bot, gone, reason="The card was deleted")
     log.info("Card deleted msg=%d guild=%s code returned=%s", message_id, gone.get("guild_id"),
              "yes" if returned else "no")

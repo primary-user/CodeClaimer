@@ -76,7 +76,7 @@ Challenge modes: Easy, Medium, Hard, Difficulty Over Time, Periodic Table, Rando
 | `commands.py` | Slash commands and panels |
 | `challenges.py` | Claim challenge generators |
 | `parsing.py` | Input cleaning, link blocking, expirations, bulk format |
-| `assets/` | Claw tiles, served to Discord through jsDelivr |
+| `assets/` | Claw tiles, served to Discord from this repo |
 | `tools/build_claw.py` | Rebuilds the claw tiles from `assets/codeclaimer_icon.jpg` |
 
 ## Running it

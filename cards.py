@@ -74,12 +74,13 @@ def _now_ts() -> int:
 # Claw tiles
 # ---------------------------------------------------------------------------
 # Animated thumbnails built by tools/build_claw.py from the brand icon. They are
-# served from the public repo through jsDelivr, so servers need no Attach Files
-# permission and nothing is uploaded per card. New art gets a new file name
-# (v2, v3...) because the CDN caches by name. CLAW_TILES=0 turns them off.
+# served straight from the public GitHub repo, so servers need no Attach Files
+# permission and nothing is uploaded per card. Discord's media proxy caches them.
+# New art gets a new file name (v2, v3...) so cached copies never go stale.
+# CLAW_ASSET_BASE points somewhere else. CLAW_TILES=0 turns them off.
 
 ASSET_BASE = os.getenv("CLAW_ASSET_BASE",
-                       "https://cdn.jsdelivr.net/gh/primary-user/CodeClaimer@main/assets").rstrip("/")
+                       "https://raw.githubusercontent.com/primary-user/CodeClaimer/main/assets").rstrip("/")
 TILES_ON = os.getenv("CLAW_TILES", "1") != "0"
 TILE_LIVE    = f"{ASSET_BASE}/claw-live-v1.gif"
 TILE_CLAIMED = f"{ASSET_BASE}/claw-claimed-v1.gif"

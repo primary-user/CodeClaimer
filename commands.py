@@ -7,7 +7,7 @@ import logging
 import uuid
 
 import discord
-from discord import app_commands
+from discord import app_commands, ui
 
 import cards
 import claims
@@ -35,11 +35,11 @@ def can_post_here(channel, me) -> bool:
     if me is None or not hasattr(channel, "permissions_for"):
         return True
     p = channel.permissions_for(me)
-    return p.view_channel and p.send_messages and p.embed_links
+    return p.view_channel and p.send_messages
 
 
-CANT_POST_MSG = ("I can't post in this channel. Give CodeClaimer **View Channel**, **Send Messages** "
-                 "and **Embed Links** here, or run this in another channel.")
+CANT_POST_MSG = ("I can't post in this channel. Give CodeClaimer **View Channel** and **Send Messages** "
+                 "here, or run this in another channel.")
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +166,22 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         await interaction.followup.send(text, ephemeral=True)
 
 
-class BulkSharePanelView(discord.ui.View):
+class BulkSharePanel(ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=600)
+        btn = ui.Button(label="Open the form", style=discord.ButtonStyle.primary)
+        btn.callback = self._open
+        self.add_item(ui.Container(
+            ui.TextDisplay("-# BULK SHARE"),
+            ui.TextDisplay("## Share many codes at once\nEach code gets its own card in this channel."),
+            ui.Separator(),
+            ui.TextDisplay(BULK_FORMAT_HELP),
+            ui.TextDisplay("-# You can add a message that posts above the drop, like a role ping."),
+            ui.ActionRow(btn),
+            accent_color=cards.SKY,
+        ))
 
-    @discord.ui.button(label="Open Bulk Entry Form", style=discord.ButtonStyle.primary)
-    async def open_bulk_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _open(self, interaction: discord.Interaction):
         if not can_share(interaction):
             await interaction.response.send_message(MODS_ONLY_MSG, ephemeral=True)
             return
@@ -183,51 +193,18 @@ async def bulkshare(interaction: discord.Interaction):
     if not can_share(interaction):
         await interaction.response.send_message(MODS_ONLY_MSG, ephemeral=True)
         return
-    embed = discord.Embed(title="Bulk Share Codes", description=BULK_FORMAT_HELP, color=cards.SKY)
-    embed.set_footer(text="You can also add a message that posts above the drop, like a role ping.")
-    await interaction.response.send_message(embed=embed, view=BulkSharePanelView(), ephemeral=True)
+    await interaction.response.send_message(view=BulkSharePanel(), ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
-# /settings
+# /settings (Components V2 panel)
 # ---------------------------------------------------------------------------
 
-def build_settings_embed(guild_id: int) -> discord.Embed:
-    s = db.get_settings(guild_id)
-    embed = discord.Embed(title="CodeClaimer Settings",
-                          description="How CodeClaimer works in this server.", color=cards.SKY)
-    embed.add_field(name="Who can share", value=(
-        "**Mods only**. Members can claim but not post drops." if s["mods_only"]
-        else "**Everyone** can post drops with `/sharecode` and `/bulkshare`."
-    ) + "\n-# Mod = Administrator, Manage Server or Manage Messages.", inline=False)
-    embed.add_field(name="One claim per bulk drop", value=(
-        "**On**. Each member gets one code per `/bulkshare` drop." if s["one_claim_per_batch"]
-        else "**Off**. Members can claim several codes from one bulk drop."
-    ), inline=False)
-
-    mode = s["verification_mode"]
-    detail = ""
-    if mode == "difficulty_over_time":
-        tiers = " → ".join(f"{int(d)}s" if d else "Easy" for d in _dot_tier_durations(s["dot_start_seconds"]))
-        detail = f"\n-# Timer: {tiers}"
-    embed.add_field(name="Claim challenge", value=(
-        f"**On**, mode **{VERIFICATION_MODES.get(mode, mode)}**. {MODE_DESCRIPTIONS.get(mode, '')}.{detail}"
-        if s["claim_verification"] else "**Off**. First click wins."
-    ) + "\n-# A wrong answer locks that member out of the card for 15 seconds.", inline=False)
-
-    roles = s["claim_roles"]
-    embed.add_field(name="Who can claim", value=(
-        "Members with " + " ".join(f"<@&{r}>" for r in roles) + ". Mods always can."
-        if roles else "**Everyone**."
-    ), inline=False)
-    cd = s["claim_cooldown_minutes"]
-    embed.add_field(name="Claim cooldown", value=(
-        f"**{cd} min** between claims per member." if cd else "**Off**."
-    ), inline=False)
-    embed.add_field(name="Support", value=(
-        f"[Vote on Top.gg]({cards.TOPGG_URL}) · [Ko-fi]({cards.KOFI_URL}) · [Support server]({cards.SUPPORT_URL})"
-    ), inline=False)
-    return embed
+def _footer_links() -> ui.TextDisplay:
+    return ui.TextDisplay(
+        f"-# [Vote on Top.gg]({cards.VOTE_URL}) · [Ko-fi]({cards.KOFI_URL}) · "
+        f"[Support server]({cards.SUPPORT_URL}) · CodeClaimer is built and run by one person"
+    )
 
 
 class DOTTimerModal(discord.ui.Modal, title="Difficulty Over Time"):
@@ -247,8 +224,7 @@ class DOTTimerModal(discord.ui.Modal, title="Difficulty Over Time"):
             await interaction.response.send_message("❌ Enter a whole number from 10 to 3600.", ephemeral=True)
             return
         db.set_setting(self.guild_id, "dot_start_seconds", seconds)
-        await interaction.response.edit_message(embed=build_settings_embed(self.guild_id),
-                                                view=SettingsView(self.guild_id))
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
 
 
 class CooldownModal(discord.ui.Modal, title="Claim Cooldown"):
@@ -268,92 +244,123 @@ class CooldownModal(discord.ui.Modal, title="Claim Cooldown"):
             await interaction.response.send_message("❌ Enter a whole number from 0 to 1440.", ephemeral=True)
             return
         db.set_setting(self.guild_id, "claim_cooldown_minutes", mins)
-        await interaction.response.edit_message(embed=build_settings_embed(self.guild_id),
-                                                view=SettingsView(self.guild_id))
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
 
 
-class SettingsView(discord.ui.View):
+async def _mod_check(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None or not is_moderator(interaction.user):
+        await interaction.response.send_message("Only moderators can change CodeClaimer settings.", ephemeral=True)
+        return False
+    return True
+
+
+class SettingsPanel(ui.LayoutView):
+    """One ephemeral panel. Every control redraws the panel in place."""
+
     def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=600)
         self.guild_id = guild_id
         s = db.get_settings(guild_id)
-
-        def toggle(label_on, label_off, on, column, row):
-            btn = discord.ui.Button(label=label_on if on else label_off,
-                                    style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
-                                    row=row)
-
-            async def cb(interaction: discord.Interaction):
-                if not await self._mod_check(interaction):
-                    return
-                current = db.get_settings(self.guild_id)[column]
-                db.set_setting(self.guild_id, column, 0 if current else 1)
-                log.info("Setting changed guild=%d %s=%s", self.guild_id, column, 0 if current else 1)
-                await interaction.response.edit_message(embed=build_settings_embed(self.guild_id),
-                                                        view=SettingsView(self.guild_id))
-            btn.callback = cb
-            self.add_item(btn)
-
-        toggle("Sharing: Mods only", "Sharing: Everyone", s["mods_only"], "mods_only", 0)
-        toggle("One per bulk drop: On", "One per bulk drop: Off", s["one_claim_per_batch"], "one_claim_per_batch", 0)
-        toggle("Challenge: On", "Challenge: Off", s["claim_verification"], "claim_verification", 0)
-
         mode = s["verification_mode"]
-        select = discord.ui.Select(
-            placeholder=f"Challenge mode: {VERIFICATION_MODES.get(mode, mode)}", row=1,
-            options=[discord.SelectOption(label=label, value=key, description=MODE_DESCRIPTIONS[key][:100],
-                                          default=(key == mode))
-                     for key, label in VERIFICATION_MODES.items()],
-        )
+        parts: list = [
+            ui.TextDisplay("-# SETTINGS"),
+            ui.TextDisplay("## CodeClaimer\nHow drops work in this server. Changes save instantly."),
+            ui.Separator(spacing=discord.SeparatorSpacing.large),
+        ]
 
-        async def mode_cb(interaction: discord.Interaction):
-            if not await self._mod_check(interaction):
-                return
-            db.set_setting(self.guild_id, "verification_mode", interaction.data["values"][0])
-            await interaction.response.edit_message(embed=build_settings_embed(self.guild_id),
-                                                    view=SettingsView(self.guild_id))
-        select.callback = mode_cb
-        self.add_item(select)
+        parts.append(self._toggle_section(
+            "Who can share",
+            "**Mods only.** Members claim, mods post drops." if s["mods_only"]
+            else "**Everyone** can post drops.",
+            "mods_only", s["mods_only"], on_label="Let everyone share", off_label="Mods only",
+        ))
+        parts.append(self._toggle_section(
+            "One claim per bulk drop",
+            "**On.** Each member gets one code from a `/bulkshare` drop." if s["one_claim_per_batch"]
+            else "**Off.** Members can claim several codes from one bulk drop.",
+            "one_claim_per_batch", s["one_claim_per_batch"],
+        ))
+        parts.append(self._toggle_section(
+            "Claim challenge",
+            (f"**On.** {VERIFICATION_MODES.get(mode, mode)}: {MODE_DESCRIPTIONS.get(mode, '')}. "
+             "A wrong answer locks that member out of the card for 15 seconds.")
+            if s["claim_verification"] else "**Off.** First click wins. Fastest, but easier for bots.",
+            "claim_verification", s["claim_verification"],
+        ))
+        if s["claim_verification"]:
+            select = ui.Select(
+                placeholder=f"Challenge mode: {VERIFICATION_MODES.get(mode, mode)}",
+                options=[discord.SelectOption(label=label, value=key, description=MODE_DESCRIPTIONS[key][:100],
+                                              default=(key == mode))
+                         for key, label in VERIFICATION_MODES.items()],
+            )
+            select.callback = self._mode_cb
+            parts.append(ui.ActionRow(select))
+            if mode == "difficulty_over_time":
+                tiers = " → ".join(f"{int(d)}s" if d else "Easy" for d in _dot_tier_durations(s["dot_start_seconds"]))
+                btn = ui.Button(label="Edit timer", style=discord.ButtonStyle.secondary)
+                btn.callback = self._dot_cb
+                parts.append(ui.Section(ui.TextDisplay(f"-# Timer: {tiers}"), accessory=btn))
 
-        roles = discord.ui.RoleSelect(placeholder="Who can claim: pick roles, or clear for everyone",
-                                      min_values=0, max_values=25, row=2,
-                                      default_values=[discord.Object(id=r) for r in s["claim_roles"][:25]])
-
-        async def roles_cb(interaction: discord.Interaction):
-            if not await self._mod_check(interaction):
-                return
-            db.set_setting(self.guild_id, "claim_roles", [int(v) for v in interaction.data.get("values", [])])
-            await interaction.response.edit_message(embed=build_settings_embed(self.guild_id),
-                                                    view=SettingsView(self.guild_id))
-        roles.callback = roles_cb
-        self.add_item(roles)
+        parts.append(ui.Separator())
+        roles = s["claim_roles"]
+        parts.append(ui.TextDisplay(
+            "**Who can claim**\n" + ("Members with " + " ".join(f"<@&{r}>" for r in roles) + ". Mods always can."
+                                     if roles else "**Everyone.** Pick roles below to limit claiming.")
+        ))
+        role_select = ui.RoleSelect(placeholder="Pick roles, or clear to open claiming to everyone",
+                                    min_values=0, max_values=25,
+                                    default_values=[discord.Object(id=r) for r in roles[:25]])
+        role_select.callback = self._roles_cb
+        parts.append(ui.ActionRow(role_select))
 
         cd = s["claim_cooldown_minutes"]
-        cd_btn = discord.ui.Button(label=f"Cooldown: {cd} min" if cd else "Cooldown: Off",
-                                   style=discord.ButtonStyle.secondary, row=3)
+        cd_btn = ui.Button(label="Edit", style=discord.ButtonStyle.secondary)
+        cd_btn.callback = self._cooldown_cb
+        parts.append(ui.Section(ui.TextDisplay(
+            "**Claim cooldown**\n" + (f"**{cd} min** between claims per member." if cd else "**Off.**")
+        ), accessory=cd_btn))
 
-        async def cd_cb(interaction: discord.Interaction):
-            if await self._mod_check(interaction):
-                await interaction.response.send_modal(CooldownModal(self.guild_id))
-        cd_btn.callback = cd_cb
-        self.add_item(cd_btn)
+        parts.append(ui.Separator())
+        parts.append(_footer_links())
+        self.add_item(ui.Container(*parts, accent_color=cards.SKY))
 
-        if mode == "difficulty_over_time":
-            dot_btn = discord.ui.Button(label=f"Hard tier: {s['dot_start_seconds']}s",
-                                        style=discord.ButtonStyle.secondary, row=3)
+    def _toggle_section(self, title: str, text: str, column: str, on: bool,
+                        on_label: str = "Turn off", off_label: str = "Turn on") -> ui.Section:
+        btn = ui.Button(label=on_label if on else off_label,
+                        style=discord.ButtonStyle.secondary if on else discord.ButtonStyle.primary)
 
-            async def dot_cb(interaction: discord.Interaction):
-                if await self._mod_check(interaction):
-                    await interaction.response.send_modal(DOTTimerModal(self.guild_id))
-            dot_btn.callback = dot_cb
-            self.add_item(dot_btn)
+        async def cb(interaction: discord.Interaction):
+            if not await _mod_check(interaction):
+                return
+            current = db.get_settings(self.guild_id)[column]
+            db.set_setting(self.guild_id, column, 0 if current else 1)
+            log.info("Setting changed guild=%d %s=%s", self.guild_id, column, 0 if current else 1)
+            await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
+        btn.callback = cb
+        return ui.Section(ui.TextDisplay(f"**{title}**\n{text}"), accessory=btn)
 
-    async def _mod_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild is None or not is_moderator(interaction.user):
-            await interaction.response.send_message("Only moderators can change CodeClaimer settings.",
-                                                    ephemeral=True)
-            return False
-        return True
+    async def _mode_cb(self, interaction: discord.Interaction):
+        if not await _mod_check(interaction):
+            return
+        value = interaction.data["values"][0]
+        db.set_setting(self.guild_id, "verification_mode", value)
+        log.info("Setting changed guild=%d verification_mode=%s", self.guild_id, value)
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
+
+    async def _roles_cb(self, interaction: discord.Interaction):
+        if not await _mod_check(interaction):
+            return
+        db.set_setting(self.guild_id, "claim_roles", [int(v) for v in interaction.data.get("values", [])])
+        await interaction.response.edit_message(view=SettingsPanel(self.guild_id))
+
+    async def _cooldown_cb(self, interaction: discord.Interaction):
+        if await _mod_check(interaction):
+            await interaction.response.send_modal(CooldownModal(self.guild_id))
+
+    async def _dot_cb(self, interaction: discord.Interaction):
+        if await _mod_check(interaction):
+            await interaction.response.send_modal(DOTTimerModal(self.guild_id))
 
 
 @app_commands.command(name="settings", description="Open CodeClaimer settings for this server.")
@@ -363,9 +370,7 @@ async def settings_command(interaction: discord.Interaction):
     if not is_moderator(interaction.user):
         await interaction.response.send_message("Only moderators can open CodeClaimer settings.", ephemeral=True)
         return
-    await interaction.response.send_message(embed=build_settings_embed(interaction.guild.id),
-                                            view=SettingsView(interaction.guild.id), ephemeral=True)
-
+    await interaction.response.send_message(view=SettingsPanel(interaction.guild.id), ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # /claimlog
@@ -443,41 +448,52 @@ async def claimlog(interaction: discord.Interaction, user: discord.Member | None
 # /help
 # ---------------------------------------------------------------------------
 
-@app_commands.command(name="help", description="How CodeClaimer works.")
-async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="CodeClaimer",
-        description=(
+def help_panel() -> ui.LayoutView:
+    view = ui.LayoutView(timeout=None)
+    view.add_item(ui.Container(
+        ui.TextDisplay("-# HELP"),
+        ui.TextDisplay(
+            "## CodeClaimer\n"
             "Share spare game keys and codes without posting them in public. "
-            "The code stays hidden until someone claims it. Then it shows up on their screen, "
+            "The code stays hidden until someone claims it. Then it shows on their screen, "
             "only to them, with a copy in their DMs."
         ),
-        color=cards.SKY,
-    )
-    embed.add_field(name="/sharecode", value=(
-        "Post one code. Add a platform and an expiration if you like.\n"
-        "Expiration can be a date (`12/31/2026`) or a length (`24h`, `7d`, `2w`)."
-    ), inline=False)
-    embed.add_field(name="/bulkshare", value=(
-        "Post many codes at once, one card each. With **One claim per bulk drop** on, "
-        "each member gets one code per drop."
-    ), inline=False)
-    embed.add_field(name="Withdraw code", value=(
-        "Right click a card (long press on mobile), then **Apps → Withdraw code**. "
-        "The sharer gets the code back. Mods can withdraw any drop."
-    ), inline=False)
-    embed.add_field(name="/settings and /claimlog (mods)", value=(
-        "Choose who can share and claim, add a claim challenge or cooldown, and see claim history."
-    ), inline=False)
-    embed.add_field(name="Safety", value=(
-        "Links are blocked in every field. A claim challenge and wrong answer lockout slow down bots. "
-        "Claimed and expired cards lock automatically."
-    ), inline=False)
-    embed.add_field(name="Support", value=(
-        f"[Vote on Top.gg]({cards.TOPGG_URL}) · [Ko-fi]({cards.KOFI_URL}) · [Support server]({cards.SUPPORT_URL})"
-    ), inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        ui.Separator(spacing=discord.SeparatorSpacing.large),
+        ui.TextDisplay(
+            "**/sharecode**\nPost one code. Platform and expiration are optional. "
+            "Expiration can be a date (`12/31/2026`) or a length (`24h`, `7d`, `2w`)."
+        ),
+        ui.TextDisplay(
+            "**/bulkshare**\nPost many codes at once, one card each. With **One claim per bulk drop** on, "
+            "each member gets one code per drop."
+        ),
+        ui.TextDisplay(
+            "**Withdraw code**\nRight click a card (long press on mobile), then **Apps → Withdraw code**. "
+            "The sharer gets the code back. Mods can withdraw any drop."
+        ),
+        ui.TextDisplay(
+            "**/settings** and **/claimlog** (mods)\nChoose who can share and claim, add a claim challenge "
+            "or cooldown, and see who claimed what."
+        ),
+        ui.Separator(),
+        ui.TextDisplay(
+            "-# Links are blocked in every field. Claim challenges and a wrong answer lockout slow down bots. "
+            "Claimed, expired and withdrawn cards lock on their own."
+        ),
+        ui.ActionRow(
+            cards.invite_button(),
+            ui.Button(label="Vote on Top.gg", style=discord.ButtonStyle.link, url=cards.VOTE_URL),
+            ui.Button(label="Support server", style=discord.ButtonStyle.link, url=cards.SUPPORT_URL),
+            ui.Button(label="Ko-fi", style=discord.ButtonStyle.link, url=cards.KOFI_URL),
+        ),
+        accent_color=cards.SKY,
+    ))
+    return view
 
+
+@app_commands.command(name="help", description="How CodeClaimer works.")
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(view=help_panel(), ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # Withdraw code (message command)

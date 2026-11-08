@@ -465,3 +465,18 @@ def usage_stats() -> dict:
 def live_codes_in_guild(guild_id: int) -> int:
     with get_db() as conn:
         return conn.execute("SELECT COUNT(*) FROM shared_codes WHERE guild_id = ?", (guild_id,)).fetchone()[0]
+
+
+def live_code_breakdown(limit: int = 12) -> list[dict]:
+    """Unclaimed codes per guild with the age of the oldest, biggest first."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT guild_id, COUNT(*) AS n, MIN(created_at) AS oldest, MAX(created_at) AS newest,
+                   SUM(CASE WHEN expires_at != '' THEN 1 ELSE 0 END) AS with_expiry,
+                   COUNT(DISTINCT channel_id) AS channels
+            FROM shared_codes GROUP BY guild_id ORDER BY n DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]

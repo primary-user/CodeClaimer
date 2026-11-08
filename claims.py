@@ -74,11 +74,12 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     expires_at = clean_expiration(expires_at)
     sharer_name = getattr(sharer, "display_name", None) or getattr(sharer, "name", "Someone")
 
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    challenge = bool(db.get_settings(guild_id)["claim_verification"]) if guild_id else False
     msg, style = await cards.send_claim_card(
         channel, item_name=item_name, platform=platform, expires_at=expires_at,
-        sharer_mention=sharer.mention, sharer_name=sharer_name,
+        sharer_mention=sharer.mention, sharer_name=sharer_name, challenge=challenge,
     )
-    guild_id = getattr(getattr(channel, "guild", None), "id", None)
     db.insert_code(
         message_id=msg.id, product_code=product_code, item_name=item_name, platform=platform,
         expires_at=expires_at, guild_id=guild_id, channel_id=channel.id,
@@ -284,7 +285,7 @@ async def _complete_claim(interaction: discord.Interaction, row: dict, settings:
         await interaction.user.send(embed=cards.dm_receipt_embed(
             won["item_name"], won.get("platform") or "", won["product_code"], won.get("expires_at") or "",
             interaction.guild.name if interaction.guild else None, won.get("sharer_name"),
-        ))
+        ), view=cards.dm_receipt_view())
         dm_ok = True
     except (discord.Forbidden, discord.HTTPException):
         dm_ok = False

@@ -164,6 +164,11 @@ async def daily_stats():
     try:
         s = db.usage_stats()
         log.info("Stats guilds=%d %s", len(bot.guilds), " ".join(f"{k}={v}" for k, v in s.items()))
+        for r in db.live_code_breakdown():
+            g = bot.get_guild(r["guild_id"] or 0)
+            log.info("Live codes guild=%s name=%r members=%s codes=%d channels=%d with_expiry=%d oldest=%s newest=%s",
+                     r["guild_id"], g.name if g else "(left)", g.member_count if g else "-", r["n"],
+                     r["channels"], r["with_expiry"], (r["oldest"] or "")[:10], (r["newest"] or "")[:10])
     except Exception:
         log.exception("Stats failed")
 

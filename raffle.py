@@ -84,6 +84,8 @@ def init_tables() -> None:
                 PRIMARY KEY (raffle_id, user_id)
             )
         """)
+        if "reminder_msg" not in {r[1] for r in conn.execute("PRAGMA table_info(raffles)")}:
+            conn.execute("ALTER TABLE raffles ADD COLUMN reminder_msg INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raffles_open ON raffles (status, ends_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raffle_codes_raffle ON raffle_codes (raffle_id)")
         conn.commit()

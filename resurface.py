@@ -398,6 +398,14 @@ def _closed_ref_view(row: dict, label: str, line: str, tile: str, accent: int) -
 
 
 async def on_code_gone(row: dict, state: str, claimer: str | None = None) -> None:
+    """Hook for claims, expiry, withdraw, delete and cleanup. Never raises."""
+    try:
+        await _code_gone(row, state, claimer)
+    except Exception:
+        log.exception("Resurface hook failed msg=%s", row.get("message_id"))
+
+
+async def _code_gone(row: dict, state: str, claimer: str | None) -> None:
     if row.get("channel_id"):
         _dirty.add(row["channel_id"])
     lc = row.get("last_call_msg")
@@ -516,7 +524,16 @@ async def _raffle_reminders(guild_id: int, s: dict) -> None:
 
 
 async def on_raffle_closed(r: dict) -> None:
-    """Remove the closing soon post once the raffle is drawn or cancelled."""
+    """Remove the closing soon post once the raffle is drawn or cancelled. Never raises."""
+    try:
+        await _raffle_closed(r)
+    except Exception:
+        log.exception("Raffle reminder cleanup failed raffle=%s", r.get("message_id"))
+
+
+async def _raffle_closed(r: dict) -> None:
+    if _bot is None:
+        return
     with db.get_db() as conn:
         row = conn.execute("SELECT reminder_msg FROM raffles WHERE message_id = ?", (r["message_id"],)).fetchone()
     if not row or not row[0] or row[0] < 0:

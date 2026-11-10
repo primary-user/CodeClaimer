@@ -209,6 +209,11 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_log_claimer ON claims_log (guild_id, claimer_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_log_message ON claims_log (message_id, claimer_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_codes_guild ON shared_codes (guild_id)")
+        # Lifetime counters. codes_removed counts codes that left without a
+        # claim (expired, withdrawn, card deleted, cleared), so the total of
+        # codes ever dropped survives their rows being deleted.
+        conn.execute("CREATE TABLE IF NOT EXISTS bot_stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)")
+        conn.execute("INSERT OR IGNORE INTO bot_stats (key, value) VALUES ('codes_removed', 0)")
         conn.commit()
 
 
@@ -319,6 +324,8 @@ def delete_code(message_id: int) -> dict | None:
         row = conn.execute(
             "DELETE FROM shared_codes WHERE message_id = ? RETURNING *", (message_id,)
         ).fetchone()
+        if row is not None:
+            conn.execute("UPDATE bot_stats SET value = value + 1 WHERE key = 'codes_removed'")
         conn.commit()
     return dict(row) if row else None
 
@@ -503,3 +510,18 @@ def live_code_breakdown(limit: int = 12) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def codes_dropped_total() -> int:
+    """Every code ever shared: open now + claimed from drops + raffle prizes + removed unclaimed.
+    Codes removed before the counter existed (Nov 2026) are not in it."""
+    with get_db() as conn:
+        q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+        total = q("SELECT COUNT(*) FROM shared_codes")
+        total += q("SELECT COUNT(*) FROM claims_log WHERE source = 'drop'")
+        total += q("SELECT COALESCE(SUM(value), 0) FROM bot_stats WHERE key = 'codes_removed'")
+        try:
+            total += q("SELECT COUNT(*) FROM raffle_codes")
+        except sqlite3.OperationalError:
+            pass
+    return total

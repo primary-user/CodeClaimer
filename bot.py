@@ -187,6 +187,20 @@ async def post_topgg_stats():
         log.warning("Top.gg stats failed: %s", e)
 
 
+@tasks.loop(minutes=30)
+async def update_presence():
+    """Status next to the avatar and on the profile: "42 servers · 1,134 codes dropped" (HotDrop style)."""
+    try:
+        servers, dropped = len(bot.guilds), db.codes_dropped_total()
+        text = f"{servers:,} servers · {dropped:,} codes dropped"
+        if text != getattr(bot, "_presence_text", None):
+            await bot.change_presence(activity=discord.CustomActivity(name=text))
+            bot._presence_text = text
+            log.info("Presence updated: %s", text)
+    except Exception:
+        log.exception("Presence update failed")
+
+
 @tasks.loop(hours=24)
 async def daily_stats():
     try:
@@ -201,7 +215,7 @@ async def daily_stats():
         log.exception("Stats failed")
 
 
-for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats):
+for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats, update_presence):
     @loop.before_loop
     async def _wait_ready():
         await bot.wait_until_ready()
@@ -217,7 +231,7 @@ async def on_ready():
     members = sum(g.member_count or 0 for g in bot.guilds)
     log.info("Logged in as %s (%d) guilds=%d members=%d db=%s",
              bot.user, bot.user.id, len(bot.guilds), members, db.DB_PATH)
-    for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats):
+    for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats, update_presence):
         if not loop.is_running():
             loop.start()
     raffle.start(bot)
@@ -230,12 +244,14 @@ async def on_guild_join(guild: discord.Guild):
     db.seed_guild_settings([guild.id])
     log.info("Joined guild=%d name=%r members=%s total_guilds=%d",
              guild.id, guild.name, guild.member_count, len(bot.guilds))
+    await update_presence()
 
 
 @bot.event
 async def on_guild_remove(guild: discord.Guild):
     log.info("Left guild=%d name=%r members=%s live_codes=%d total_guilds=%d",
              guild.id, guild.name, guild.member_count, db.live_codes_in_guild(guild.id), len(bot.guilds))
+    await update_presence()
 
 
 @bot.event

@@ -68,7 +68,8 @@ def format_wait(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 async def post_claim_card(channel, sharer, item_name: str, platform: str, product_code: str,
-                          expires_at: str = "", batch_id: str = "") -> discord.Message:
+                          expires_at: str = "", batch_id: str = "", label: str | None = None,
+                          note: str = "", is_test: bool = False) -> discord.Message:
     """Post a claim card and store the code. Raises discord.Forbidden if we can't post."""
     platform   = clean_platform(platform)
     expires_at = clean_expiration(expires_at)
@@ -78,17 +79,17 @@ async def post_claim_card(channel, sharer, item_name: str, platform: str, produc
     challenge = bool(db.get_settings(guild_id)["claim_verification"]) if guild_id else False
     msg, style = await cards.send_claim_card(
         channel, item_name=item_name, platform=platform, expires_at=expires_at,
-        sharer_mention=sharer.mention, sharer_name=sharer_name, challenge=challenge,
+        sharer_mention=sharer.mention, sharer_name=sharer_name, challenge=challenge, label=label, note=note,
     )
     db.insert_code(
         message_id=msg.id, product_code=product_code, item_name=item_name, platform=platform,
         expires_at=expires_at, guild_id=guild_id, channel_id=channel.id,
         sharer_id=getattr(sharer, "id", None), sharer_name=sharer_name,
-        batch_id=batch_id, card_style=style,
+        batch_id=batch_id, card_style=style, is_test=is_test,
     )
-    log.info("Drop posted guild=%s channel=%s msg=%d sharer=%s batch=%s expires=%s style=%s",
+    log.info("Drop posted guild=%s channel=%s msg=%d sharer=%s batch=%s expires=%s style=%s test=%s",
              guild_id, channel.id, msg.id, getattr(sharer, "id", None),
-             (batch_id or "-")[:8], "yes" if expires_at else "no", style)
+             (batch_id or "-")[:8], "yes" if expires_at else "no", style, "yes" if is_test else "no")
     return msg
 
 
@@ -136,8 +137,8 @@ async def handle_claim_click(interaction: discord.Interaction, message_id: int |
         mine = db.get_claim_for_user(msg_id, interaction.user.id)
         if mine and mine.get("product_code"):
             await interaction.response.send_message(
-                embed=cards.reveal_embed(mine["item_name"], mine["platform"], mine["product_code"],
-                                         mine.get("expires_at") or "", note="You already claimed this one."),
+                **cards.reveal_kwargs(mine["item_name"], mine["platform"], mine["product_code"],
+                                      mine.get("expires_at") or "", note="You already claimed this one."),
                 ephemeral=True,
             )
             return
@@ -254,13 +255,15 @@ class ChallengeView(discord.ui.View):
 # Hand over the code
 # ---------------------------------------------------------------------------
 
-async def _respond(interaction: discord.Interaction, via_challenge: bool, content=None, embed=None):
+async def _respond(interaction: discord.Interaction, via_challenge: bool, content=None, embed=None,
+                   allowed_mentions=None):
     """Answer a deferred interaction: edit the challenge message, or send the followup."""
+    am = allowed_mentions or discord.AllowedMentions.none()
     try:
         if via_challenge:
-            await interaction.edit_original_response(content=content, embed=embed, view=None)
+            await interaction.edit_original_response(content=content, embed=embed, view=None, allowed_mentions=am)
         else:
-            await interaction.followup.send(content=content, embed=embed, ephemeral=True)
+            await interaction.followup.send(content=content, embed=embed, ephemeral=True, allowed_mentions=am)
     except discord.HTTPException as e:
         log.warning("Could not answer claim interaction user=%d: %s", interaction.user.id, e)
 
@@ -283,17 +286,17 @@ async def _complete_claim(interaction: discord.Interaction, row: dict, settings:
     # Private reveal first. DMs are a bonus copy, never a requirement.
     dm_ok = False
     try:
-        await interaction.user.send(embed=cards.dm_receipt_embed(
+        await cards.send_dm_code(interaction.user, cards.dm_receipt_embed(
             won["item_name"], won.get("platform") or "", won["product_code"], won.get("expires_at") or "",
             interaction.guild.name if interaction.guild else None, won.get("sharer_name"),
-        ))
+        ), won["product_code"])
         dm_ok = True
     except (discord.Forbidden, discord.HTTPException):
         dm_ok = False
 
     note = ("A copy is in your DMs." if dm_ok
             else "Your DMs are closed, so save this now. The Show my code button on the card brings it back.")
-    await _respond(interaction, via_challenge, embed=cards.reveal_embed(
+    await _respond(interaction, via_challenge, **cards.reveal_kwargs(
         won["item_name"], won.get("platform") or "", won["product_code"], won.get("expires_at") or "", note=note,
     ))
     log.info("Claim guild=%s msg=%d user=%d verify=%s dm=%s",
@@ -319,8 +322,8 @@ async def handle_show_my_code(interaction: discord.Interaction) -> None:
         )
         return
     await interaction.response.send_message(
-        embed=cards.reveal_embed(mine["item_name"], mine["platform"], mine["product_code"],
-                                 mine.get("expires_at") or ""),
+        **cards.reveal_kwargs(mine["item_name"], mine["platform"], mine["product_code"],
+                              mine.get("expires_at") or ""),
         ephemeral=True,
     )
 
@@ -368,9 +371,9 @@ async def withdraw(interaction: discord.Interaction, message: discord.Message) -
 
     if is_sharer:
         await interaction.response.send_message(
-            embed=cards.reveal_embed(gone["item_name"], gone.get("platform") or "", gone["product_code"],
-                                     gone.get("expires_at") or "", note="Nobody saw it. It's back in your hands.",
-                                     title="↩️ Withdrawn"),
+            **cards.reveal_kwargs(gone["item_name"], gone.get("platform") or "", gone["product_code"],
+                                  gone.get("expires_at") or "", note="Nobody saw it. It's back in your hands.",
+                                  title="↩️ Withdrawn"),
             ephemeral=True,
         )
         return
@@ -397,16 +400,17 @@ async def on_card_deleted(message_id: int) -> None:
 
 async def _return_to_sharer(client, row: dict, reason: str) -> bool:
     sharer_id = row.get("sharer_id")
-    if not sharer_id:
+    if not sharer_id or row.get("is_test"):
         return False
     try:
         user = client.get_user(sharer_id) or await client.fetch_user(sharer_id)
         guild = client.get_guild(row.get("guild_id") or 0)
         where = f" in {guild.name}" if guild else ""
-        await user.send(embed=cards.reveal_embed(
+        await cards.send_dm_code(user, cards.reveal_embed(
             row["item_name"], row.get("platform") or "", row["product_code"], row.get("expires_at") or "",
             note=f"{reason}{where} before anyone claimed it.", title="↩️ Your code is back",
-        ))
+            tip=cards.MOBILE_TIP_DM,
+        ), row["product_code"])
         return True
     except (discord.HTTPException, discord.NotFound):
         return False

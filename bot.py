@@ -11,6 +11,8 @@ router, and the background loops. Feature code lives in:
   raffle.py      raffle drops, entries and the draw
   refresh.py     one time redraw of pre v2 cards
   resurface.py   roundups, last call, raffle reminders, 60 day cleanup
+  welcome.py     welcome card and test drop for newly added servers
+  botlists.py    server counts for Top.gg and the other bot lists
   commands.py    slash commands and panels
 """
 import asyncio
@@ -22,12 +24,14 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
+import botlists
 import cards
 import claims
 import db
 import raffle
 import refresh
 import resurface
+import welcome
 from commands import ALL_COMMANDS
 from parsing import is_expired
 
@@ -42,7 +46,6 @@ log = logging.getLogger("codeclaimer")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN environment variable.")
-TOPGG_TOKEN = (os.getenv("TOPGG_TOKEN") or "").strip()
 
 
 class CodeBot(commands.Bot):
@@ -50,7 +53,6 @@ class CodeBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default(),
                          help_command=None)
         self.http_session: aiohttp.ClientSession | None = None
-        self._last_topgg_count: int | None = None
 
     async def setup_hook(self):
         db.backup_db()
@@ -59,6 +61,7 @@ class CodeBot(commands.Bot):
         raffle.recover_stuck()
         refresh.init_table()
         resurface.init_tables()
+        welcome.init_table()
         claims.bind(self)
         self.http_session = aiohttp.ClientSession()
         for cmd in ALL_COMMANDS:
@@ -101,6 +104,11 @@ PREFIX_ROUTES = [
     (resurface.APPROVE_PREFIX,    lambda i, x: resurface.handle_approval(i, x, True)),
     (resurface.SKIP_PREFIX,       lambda i, x: resurface.handle_approval(i, x, False)),
 ]
+ROUTES.update({
+    welcome.TEST_ID:     welcome.handle_test,
+    welcome.SETTINGS_ID: welcome.handle_settings,
+    welcome.HELP_ID:     welcome.handle_help,
+})
 
 
 @bot.event
@@ -167,24 +175,8 @@ async def expire_unclaimed_codes():
 
 @tasks.loop(minutes=30)
 async def post_topgg_stats():
-    if not TOPGG_TOKEN:
-        return
-    count = len(bot.guilds)
-    try:
-        async with bot.http_session.post(
-            f"https://top.gg/api/bots/{bot.user.id}/stats",
-            json={"server_count": count},
-            headers={"Authorization": TOPGG_TOKEN},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            if resp.status >= 400:
-                log.warning("Top.gg stats HTTP %d: %s", resp.status, (await resp.text())[:200])
-                return
-        if count != bot._last_topgg_count:
-            log.info("Top.gg server count posted: %d", count)
-            bot._last_topgg_count = count
-    except Exception as e:
-        log.warning("Top.gg stats failed: %s", e)
+    """Server count to Top.gg and every other bot list with a token set."""
+    await botlists.post_all(bot.http_session, bot.user.id, len(bot.guilds))
 
 
 @tasks.loop(minutes=30)
@@ -228,6 +220,7 @@ for loop in (expire_unclaimed_codes, post_topgg_stats, daily_stats, update_prese
 @bot.event
 async def on_ready():
     db.seed_guild_settings([g.id for g in bot.guilds])
+    welcome.mark_existing([g.id for g in bot.guilds])
     members = sum(g.member_count or 0 for g in bot.guilds)
     log.info("Logged in as %s (%d) guilds=%d members=%d db=%s",
              bot.user, bot.user.id, len(bot.guilds), members, db.DB_PATH)
@@ -244,6 +237,7 @@ async def on_guild_join(guild: discord.Guild):
     db.seed_guild_settings([guild.id])
     log.info("Joined guild=%d name=%r members=%s total_guilds=%d",
              guild.id, guild.name, guild.member_count, len(bot.guilds))
+    await welcome.on_guild_join(guild)
     await update_presence()
 
 

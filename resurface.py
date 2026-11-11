@@ -141,7 +141,8 @@ def posted_at(row: dict) -> datetime:
 def open_codes(channel_id: int) -> list[dict]:
     with db.get_db() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM shared_codes WHERE channel_id = ? AND product_code != ''", (channel_id,)).fetchall()]
+            "SELECT * FROM shared_codes WHERE channel_id = ? AND product_code != '' AND is_test = 0",
+            (channel_id,)).fetchall()]
     return [r for r in rows if not is_expired(r.get("expires_at"))]
 
 

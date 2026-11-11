@@ -120,7 +120,7 @@ def _facts(platform: str, expires_at: str, extra: list[str] | None = None) -> st
 
 
 def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention: str,
-                 label: str | None = None, challenge: bool = False) -> ui.LayoutView:
+                 label: str | None = None, challenge: bool = False, note: str = "") -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     how = "Solve a quick question to claim" if challenge else "First to claim gets it"
     head = f"-# {label or random.choice(DROP_LABELS)}  ·  {how.upper()}"
@@ -128,6 +128,8 @@ def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention:
     facts = _facts(platform, expires_at)
     if facts:
         body += f"\n{facts}"
+    if note:
+        body += f"\n{note}"
     view.add_item(ui.Container(
         *tile_section([head, body], TILE_LIVE, "Claw reaching for a gift"),
         ui.TextDisplay(f"-# Shared by {sharer_mention}. The code only shows to whoever claims it."),
@@ -230,15 +232,31 @@ def legacy_link_view() -> None:
 # Private reveal and DM receipt
 # ---------------------------------------------------------------------------
 
+MOBILE_TIP = "On mobile, long-press the code above and tap Copy Text."
+MOBILE_TIP_DM = "The code is in the next message. On mobile, long-press it and tap Copy Text."
+NO_MENTIONS = discord.AllowedMentions.none()
+
+
+def plain_code(code: str) -> str:
+    """The code exactly as typed, alone, so mobile Copy Text copies it and nothing else."""
+    return str(code).strip()[:1900]
+
+
 def reveal_embed(item_name: str, platform: str, code: str, expires_at: str, note: str = "",
-                 title: str = "🎁 It's yours") -> discord.Embed:
-    embed = discord.Embed(title=title, description=f"**{item_label(item_name, platform)}**\n```\n{code}\n```",
-                          color=NAVY)
+                 title: str = "🎁 It's yours", tip: str = MOBILE_TIP) -> discord.Embed:
+    """Details card for a private reveal. The code itself goes in the message content (see reveal_kwargs)."""
+    embed = discord.Embed(title=title, description=f"**{item_label(item_name, platform)}**", color=NAVY)
     if clean_expiration(expires_at):
         embed.add_field(name="Redeem before", value=expiry_text(expires_at), inline=False)
-    if note:
-        embed.set_footer(text=note)
+    embed.set_footer(text=f"{note} {tip}".strip())
     return embed
+
+
+def reveal_kwargs(item_name: str, platform: str, code: str, expires_at: str, note: str = "",
+                  title: str = "🎁 It's yours") -> dict:
+    """Message kwargs: bare code as content (copyable on mobile), details card underneath."""
+    return dict(content=plain_code(code), allowed_mentions=NO_MENTIONS,
+                embed=reveal_embed(item_name, platform, code, expires_at, note=note, title=title))
 
 
 def dm_receipt_embed(item_name: str, platform: str, code: str, expires_at: str,
@@ -246,12 +264,19 @@ def dm_receipt_embed(item_name: str, platform: str, code: str, expires_at: str,
     where = f" in **{guild_name}**" if guild_name else ""
     by = f" Shared by {sharer}." if sharer else ""
     how = "You won this in a raffle" if raffle else "You claimed this"
-    desc = f"{how}{where}.{by}\n\n**{item_label(item_name, platform)}**\n```\n{code}\n```"
+    desc = f"{how}{where}.{by}\n\n**{item_label(item_name, platform)}**"
     if clean_expiration(expires_at):
-        desc += f"\n**Redeem before** {expiry_text(expires_at)}\n"
+        desc += f"\n**Redeem before** {expiry_text(expires_at)}"
+    desc += "\n\nThe code is in the next message. On mobile, long-press it and tap Copy Text."
     desc += f"\n-# [Add CodeClaimer to your server]({INVITE_URL})  ·  [Vote on Top.gg]({VOTE_URL})"
     embed = discord.Embed(title="🎁 Your code", description=desc, color=NAVY)
     return _legacy_tile(embed, TILE_CLAIMED)
+
+
+async def send_dm_code(user, embed: discord.Embed, code: str) -> None:
+    """DM the details card, then the bare code as its own message. Raises if DMs are closed."""
+    await user.send(embed=embed)
+    await user.send(content=plain_code(code), allowed_mentions=NO_MENTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +285,11 @@ def dm_receipt_embed(item_name: str, platform: str, code: str, expires_at: str,
 
 async def send_claim_card(channel, item_name: str, platform: str, expires_at: str,
                           sharer_mention: str, sharer_name: str, challenge: bool = False,
-                          label: str | None = None) -> tuple[discord.Message, str]:
+                          label: str | None = None, note: str = "") -> tuple[discord.Message, str]:
     """Post a new claim card. Returns (message, card_style)."""
     msg = await channel.send(
-        view=v2_live_card(item_name, platform, expires_at, sharer_mention, label=label, challenge=challenge),
+        view=v2_live_card(item_name, platform, expires_at, sharer_mention, label=label, challenge=challenge,
+                          note=note),
         allowed_mentions=discord.AllowedMentions.none(),
     )
     return msg, "v2"

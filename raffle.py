@@ -536,10 +536,10 @@ async def draw(raffle_id: int) -> None:
         for winner, code in pairs:
             try:
                 user = _bot.get_user(winner["user_id"]) or await _bot.fetch_user(winner["user_id"])
-                await user.send(embed=cards.dm_receipt_embed(
+                await cards.send_dm_code(user, cards.dm_receipt_embed(
                     code["item_name"], code["platform"], code["product_code"], code["expires_at"],
                     guild.name if guild else None, r["host_name"], raffle=True,
-                ))
+                ), code["product_code"])
             except discord.HTTPException:
                 pass
             await asyncio.sleep(0.3)

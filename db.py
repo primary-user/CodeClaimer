@@ -174,6 +174,7 @@ def init_db() -> None:
             ("card_style",  "TEXT NOT NULL DEFAULT 'legacy'"),
             ("resurface_count", "INTEGER NOT NULL DEFAULT 0"),
             ("last_call_msg",   "INTEGER"),
+            ("is_test",         "INTEGER NOT NULL DEFAULT 0"),
         ])
         _add_columns(conn, "guild_settings", [
             ("one_claim_per_batch",    "INTEGER NOT NULL DEFAULT 1"),
@@ -296,18 +297,18 @@ def set_setting(guild_id: int, column: str, value) -> None:
 def insert_code(
     message_id: int, product_code: str, item_name: str, platform: str, expires_at: str,
     guild_id: int | None, channel_id: int | None, sharer_id: int | None,
-    sharer_name: str, batch_id: str, card_style: str,
+    sharer_name: str, batch_id: str, card_style: str, is_test: bool = False,
 ) -> None:
     with get_db() as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO shared_codes
                 (message_id, product_code, item_name, platform, expires_at,
-                 guild_id, channel_id, sharer_id, sharer_name, created_at, batch_id, card_style)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 guild_id, channel_id, sharer_id, sharer_name, created_at, batch_id, card_style, is_test)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (message_id, product_code, item_name, platform, expires_at, guild_id, channel_id,
-             sharer_id, sharer_name, now_iso(), batch_id or None, card_style),
+             sharer_id, sharer_name, now_iso(), batch_id or None, card_style, 1 if is_test else 0),
         )
         conn.commit()
 
@@ -324,7 +325,7 @@ def delete_code(message_id: int) -> dict | None:
         row = conn.execute(
             "DELETE FROM shared_codes WHERE message_id = ? RETURNING *", (message_id,)
         ).fetchone()
-        if row is not None:
+        if row is not None and not row["is_test"]:
             conn.execute("UPDATE bot_stats SET value = value + 1 WHERE key = 'codes_removed'")
         conn.commit()
     return dict(row) if row else None
@@ -417,11 +418,12 @@ def claim_code(
                 INSERT INTO claims_log
                     (guild_id, channel_id, message_id, claimer_id, claimer_name, item_name,
                      platform, sharer_id, sharer_name, claimed_at, product_code, expires_at, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'drop')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (guild_id, row.get("channel_id"), message_id, user_id, user_name,
                  row["item_name"], row.get("platform") or "", row.get("sharer_id"),
-                 row.get("sharer_name"), ts, row["product_code"], row.get("expires_at") or ""),
+                 row.get("sharer_name"), ts, row["product_code"], row.get("expires_at") or "",
+                 "test" if row.get("is_test") else "drop"),
             )
         conn.commit()
         return "ok", row
@@ -477,13 +479,13 @@ def usage_stats() -> dict:
     with get_db() as conn:
         q = lambda sql, *a: conn.execute(sql, a).fetchone()[0]  # noqa: E731
         stats = {
-            "live_codes":      q("SELECT COUNT(*) FROM shared_codes"),
+            "live_codes":      q("SELECT COUNT(*) FROM shared_codes WHERE is_test = 0"),
             "live_code_guilds": q("SELECT COUNT(DISTINCT guild_id) FROM shared_codes"),
-            "claims_total":    q("SELECT COUNT(*) FROM claims_log"),
-            "claims_7d":       q("SELECT COUNT(*) FROM claims_log WHERE claimed_at >= ?", d7),
-            "claims_30d":      q("SELECT COUNT(*) FROM claims_log WHERE claimed_at >= ?", d30),
-            "claimers_30d":    q("SELECT COUNT(DISTINCT claimer_id) FROM claims_log WHERE claimed_at >= ?", d30),
-            "guilds_active_30d": q("SELECT COUNT(DISTINCT guild_id) FROM claims_log WHERE claimed_at >= ?", d30),
+            "claims_total":    q("SELECT COUNT(*) FROM claims_log WHERE source != 'test'"),
+            "claims_7d":       q("SELECT COUNT(*) FROM claims_log WHERE source != 'test' AND claimed_at >= ?", d7),
+            "claims_30d":      q("SELECT COUNT(*) FROM claims_log WHERE source != 'test' AND claimed_at >= ?", d30),
+            "claimers_30d":    q("SELECT COUNT(DISTINCT claimer_id) FROM claims_log WHERE source != 'test' AND claimed_at >= ?", d30),
+            "guilds_active_30d": q("SELECT COUNT(DISTINCT guild_id) FROM claims_log WHERE source != 'test' AND claimed_at >= ?", d30),
         }
         try:
             stats["raffles_open"] = q("SELECT COUNT(*) FROM raffles WHERE status = 'open'")
@@ -517,7 +519,7 @@ def codes_dropped_total() -> int:
     Codes removed before the counter existed (Nov 2026) are not in it."""
     with get_db() as conn:
         q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
-        total = q("SELECT COUNT(*) FROM shared_codes")
+        total = q("SELECT COUNT(*) FROM shared_codes WHERE is_test = 0")
         total += q("SELECT COUNT(*) FROM claims_log WHERE source = 'drop'")
         total += q("SELECT COALESCE(SUM(value), 0) FROM bot_stats WHERE key = 'codes_removed'")
         try:

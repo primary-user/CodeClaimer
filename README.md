@@ -19,6 +19,9 @@ Share spare game keys and codes without posting them in public. A code stays hid
 
 - **Codes stay private.** Shown only to the winner, on screen, so closed DMs never block a claim. A DM copy is sent when DMs are open.
 - **Show my code.** The winner can bring their code back from the card any time.
+- **Easy copy on mobile.** The bare code sits on its own in the private reveal and in a second DM, so a long press and Copy Text grabs just the code.
+- **Welcome card.** Servers that add CodeClaimer get one short card with mod only buttons: Post a test drop, Open settings, How it works. Test drops use a fake code, expire in 24 hours and never count in stats.
+- **Live status.** The profile shows servers and total codes dropped.
 - **Raffles.** Up to 20 prizes, 1 minute to 14 days, random draw, restart safe.
 - **Claim challenges.** Six modes to slow down bots, plus a 15 second lockout after a wrong answer.
 - **One claim per bulk drop**, **role gate** and **per member cooldown**, all enforced in a single database transaction.
@@ -78,6 +81,8 @@ Challenge modes: Easy, Medium, Hard, Difficulty Over Time, Periodic Table, Rando
 | `raffle.py` | Raffle form, entries, draw loop, cancel |
 | `resurface.py` | Roundups, Browse all, approvals, last call, raffle reminders, 60 day cleanup |
 | `refresh.py` | One time redraw of pre v2 cards |
+| `welcome.py` | Welcome card and test drop for newly added servers |
+| `botlists.py` | Server counts for Top.gg and other bot lists |
 | `commands.py` | Slash commands and panels |
 | `challenges.py` | Claim challenge generators |
 | `parsing.py` | Input cleaning, link blocking, expirations, bulk format |
@@ -93,6 +98,9 @@ Railway, one worker, a volume mounted at `/app/data`.
 | `DISCORD_TOKEN` | Bot token |
 | `DB_PATH` | `/app/data/codes.db` on Railway |
 | `TOPGG_TOKEN` | Optional. Posts the server count to Top.gg |
+| `DBL_TOKEN` | Optional. Server count to discordbotlist.com |
+| `DBOTS_TOKEN` | Optional. Server count to discord.bots.gg |
+| `DISCORDS_TOKEN` | Optional. Server count to discords.com (`DISCORDS_URL` overrides the endpoint) |
 | `CLAW_TILES` | Optional. `0` hides the claw tiles |
 
 On every boot the database is copied to `data/backups/` (newest 2 kept) before migrations run. Migrations only add tables and columns, so cards posted by any earlier version keep working.

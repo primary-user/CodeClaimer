@@ -409,7 +409,6 @@ async def _return_to_sharer(client, row: dict, reason: str) -> bool:
         await cards.send_dm_code(user, cards.reveal_embed(
             row["item_name"], row.get("platform") or "", row["product_code"], row.get("expires_at") or "",
             note=f"{reason}{where} before anyone claimed it.", title="↩️ Your code is back",
-            tip=cards.MOBILE_TIP_DM,
         ), row["product_code"])
         return True
     except (discord.HTTPException, discord.NotFound):

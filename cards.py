@@ -233,13 +233,14 @@ def legacy_link_view() -> None:
 # ---------------------------------------------------------------------------
 
 MOBILE_TIP = "On mobile, long-press the code above and tap Copy Text."
-MOBILE_TIP_DM = "The code is in the next message. On mobile, long-press it and tap Copy Text."
 NO_MENTIONS = discord.AllowedMentions.none()
 
 
-def plain_code(code: str) -> str:
-    """The code exactly as typed, alone, so mobile Copy Text copies it and nothing else."""
-    return str(code).strip()[:1900]
+def code_content(code: str) -> str:
+    """The code alone in a code block, as message text. Mobile can't copy from embeds,
+    so with the code as the only text, long press Copy Text grabs it."""
+    c = str(code).strip()[:1900]
+    return c if "`" in c else f"```\n{c}\n```"
 
 
 def reveal_embed(item_name: str, platform: str, code: str, expires_at: str, note: str = "",
@@ -255,7 +256,7 @@ def reveal_embed(item_name: str, platform: str, code: str, expires_at: str, note
 def reveal_kwargs(item_name: str, platform: str, code: str, expires_at: str, note: str = "",
                   title: str = "🎁 It's yours") -> dict:
     """Message kwargs: bare code as content (copyable on mobile), details card underneath."""
-    return dict(content=plain_code(code), allowed_mentions=NO_MENTIONS,
+    return dict(content=code_content(code), allowed_mentions=NO_MENTIONS,
                 embed=reveal_embed(item_name, platform, code, expires_at, note=note, title=title))
 
 
@@ -267,16 +268,15 @@ def dm_receipt_embed(item_name: str, platform: str, code: str, expires_at: str,
     desc = f"{how}{where}.{by}\n\n**{item_label(item_name, platform)}**"
     if clean_expiration(expires_at):
         desc += f"\n**Redeem before** {expiry_text(expires_at)}"
-    desc += "\n\nThe code is in the next message. On mobile, long-press it and tap Copy Text."
+    desc += f"\n\n{MOBILE_TIP}"
     desc += f"\n-# [Add CodeClaimer to your server]({INVITE_URL})  ·  [Vote on Top.gg]({VOTE_URL})"
     embed = discord.Embed(title="🎁 Your code", description=desc, color=NAVY)
     return _legacy_tile(embed, TILE_CLAIMED)
 
 
 async def send_dm_code(user, embed: discord.Embed, code: str) -> None:
-    """DM the details card, then the bare code as its own message. Raises if DMs are closed."""
-    await user.send(embed=embed)
-    await user.send(content=plain_code(code), allowed_mentions=NO_MENTIONS)
+    """One DM: the code above, the details card below. Raises if DMs are closed."""
+    await user.send(content=code_content(code), embed=embed, allowed_mentions=NO_MENTIONS)
 
 
 # ---------------------------------------------------------------------------

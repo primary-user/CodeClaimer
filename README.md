@@ -19,7 +19,7 @@ Share spare game keys and codes without posting them in public. A code stays hid
 
 - **Codes stay private.** Shown only to the winner, on screen, so closed DMs never block a claim. A DM copy is sent when DMs are open.
 - **Show my code.** The winner can bring their code back from the card any time.
-- **Easy copy on mobile.** The code sits alone in a code block above the details card, in the private reveal and the DM, so a long press and Copy Text grabs it.
+- **Easy copy on mobile.** The bare code sits alone above the details card, in the private reveal and the DM, so a long press and Copy Text grabs it.
 - **Welcome card.** Servers that add CodeClaimer get one short card with mod only buttons: Post a test drop, Open settings, How it works. Test drops use a fake code, expire in 24 hours and never count in stats.
 - **Live status.** The profile shows servers and total codes dropped.
 - **Raffles.** Up to 20 prizes, 1 minute to 14 days, random draw, restart safe.

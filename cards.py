@@ -237,10 +237,10 @@ NO_MENTIONS = discord.AllowedMentions.none()
 
 
 def code_content(code: str) -> str:
-    """The code alone in a code block, as message text. Mobile can't copy from embeds,
-    so with the code as the only text, long press Copy Text grabs it."""
-    c = str(code).strip()[:1900]
-    return c if "`" in c else f"```\n{c}\n```"
+    """The bare code alone as message text. Mobile can't copy from embeds, so with the
+    code as the only text, long press Copy Text grabs it. No code block: mobile copies
+    the backticks too (tested Nov 11)."""
+    return str(code).strip()[:1900]
 
 
 def reveal_embed(item_name: str, platform: str, code: str, expires_at: str, note: str = "",

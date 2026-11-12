@@ -245,7 +245,7 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
                                         max_length=100, placeholder="e.g. Friday game night giveaway")
     codes = discord.ui.TextInput(
         label="Prizes, one per line (one winner each)", style=discord.TextStyle.paragraph,
-        max_length=4000, placeholder="Hollow Knight (Steam): ABC-123\nCeleste: DEF-456 | 12/31/2026\nor just the code",
+        max_length=4000, placeholder="Game Name (Platform): CODE | expires\nHollow Knight (Steam): ABC-123 | 7d\nOr just the code",
     )
     duration = discord.ui.TextInput(label="Entries stay open for", style=discord.TextStyle.short,
                                     default="1h", max_length=10, placeholder="30m, 1h, 2d (1m to 14d)")

@@ -112,7 +112,7 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
     batch_data = discord.ui.TextInput(
         label="Codes, one per line",
         style=discord.TextStyle.paragraph, required=True, max_length=4000,
-        placeholder="Game (Steam): ABC-123 | 12/31/2026\nGame 2: DEF-456 | 7d",
+        placeholder="Game Name (Platform): CODE | expires\nHollow Knight (Steam): ABC-123 | 7d\nCeleste: DEF-456",
     )
 
     async def on_submit(self, interaction: discord.Interaction):

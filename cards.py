@@ -125,12 +125,13 @@ async def ensure_emojis(client) -> None:
 
 
 def _compact_title(text: str, emoji: str) -> str:
-    """Title one size down (## to ###) with the claw emoji in front of it."""
+    """Put the claw emoji in front of the title. The title keeps its own size:
+    ### read as too small and understated on cards (Nov 12)."""
     lines = text.split("\n")
     for i, ln in enumerate(lines):
         if ln.startswith("## ") or ln.startswith("### "):
-            title = ln.split(" ", 1)[1]
-            lines[i] = f"### {emoji} {title}" if emoji else f"### {title}"
+            hashes, title = ln.split(" ", 1)
+            lines[i] = f"{hashes} {emoji} {title}" if emoji else ln
             break
     return "\n".join(lines)
 

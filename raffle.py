@@ -252,25 +252,39 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
     ping = discord.ui.TextInput(label="Message above the raffle (optional)", style=discord.TextStyle.short,
                                 required=False, max_length=300, placeholder="e.g. @Members raffle is live!")
 
+    def __init__(self, title: str = "", codes: str = "", duration: str = "", ping: str = ""):
+        super().__init__()
+        from commands import prefill
+        prefill(self, raffle_title=title, codes=codes, ping=ping)
+        if duration:
+            self.duration.default = duration[:10]
+
     async def on_submit(self, interaction: discord.Interaction):
-        from commands import CANT_POST_MSG, LINK_MSG, MODS_ONLY_MSG, can_post_here, can_share
+        from commands import (CANT_POST_MSG, LINK_MSG, MODS_ONLY_MSG, RETRY_NOTE, RetryView,
+                              can_post_here, can_share)
         await interaction.response.defer(ephemeral=True)
         if not can_share(interaction):
             await interaction.followup.send(MODS_ONLY_MSG, ephemeral=True)
             return
-        if not can_post_here(interaction.channel, interaction.guild.me):
-            await interaction.followup.send(CANT_POST_MSG, ephemeral=True)
-            return
         title = str(self.raffle_title.value or "").strip()
         ping = str(self.ping.value or "").strip()
         raw = str(self.codes.value)
-        if any(contains_link(t) for t in (title, ping, raw)):
-            await interaction.followup.send(LINK_MSG, ephemeral=True)
+        dur = str(self.duration.value)
+
+        async def reject(text: str):
+            await interaction.followup.send(
+                text + RETRY_NOTE, ephemeral=True,
+                view=RetryView(lambda: RaffleModal(title, raw, dur, ping)))
+
+        if not can_post_here(interaction.channel, interaction.guild.me):
+            await reject(CANT_POST_MSG)
             return
-        seconds = parse_duration(str(self.duration.value))
+        if any(contains_link(t) for t in (title, ping, raw)):
+            await reject(LINK_MSG)
+            return
+        seconds = parse_duration(dur)
         if seconds is None:
-            await interaction.followup.send("❌ Entries can stay open from 1m to 14d. Try `30m`, `1h` or `2d`.",
-                                            ephemeral=True)
+            await reject("❌ Entries can stay open from 1m to 14d. Try `30m`, `1h` or `2d`.")
             return
         ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
@@ -290,7 +304,7 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
             note = ("\n\nSkipped:\n" + "\n".join(f"- {s}" for s in skipped[:5])) if skipped else ""
             log.info("Raffle rejected guild=%s host=%d lines=%d skipped=%d", interaction.guild_id,
                      interaction.user.id, len(raw.splitlines()), len(skipped))
-            await interaction.followup.send(f"❌ No prizes to raffle.{note}\n\n{BULK_FORMAT_HELP}", ephemeral=True)
+            await reject(f"❌ No prizes to raffle.{note}\n\n{BULK_FORMAT_HELP}")
             return
 
         settings = db.get_settings(interaction.guild_id)
@@ -313,7 +327,7 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
             )
         except discord.HTTPException as e:
             log.warning("Raffle post failed guild=%s: %s", interaction.guild_id, e)
-            await interaction.followup.send(CANT_POST_MSG, ephemeral=True)
+            await reject(CANT_POST_MSG)
             return
 
         with db.get_db() as conn:

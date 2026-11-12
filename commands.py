@@ -103,6 +103,31 @@ BULK_FORMAT_HELP = (
 )
 
 
+RETRY_NOTE = "\n\n-# Nothing you typed is lost. Press the button to reopen the form with it filled in."
+
+
+class RetryView(ui.View):
+    """One button that reopens a form with what the person already typed, so a
+    rejected submit never means typing it all again. Lives 15 minutes."""
+
+    def __init__(self, make_modal, label: str = "Fix and resubmit"):
+        super().__init__(timeout=900)
+        self._make_modal = make_modal
+        btn = ui.Button(label=label, style=discord.ButtonStyle.primary)
+        btn.callback = self._open
+        self.add_item(btn)
+
+    async def _open(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(self._make_modal())
+
+
+def prefill(modal: discord.ui.Modal, **values) -> None:
+    for name, value in values.items():
+        field = getattr(modal, name)
+        value = (value or "")[: field.max_length or 4000]
+        field.default = value or None
+
+
 class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
     pre_drop_message = discord.ui.TextInput(
         label="Optional message posted above the drop",
@@ -115,25 +140,34 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
         placeholder="Game Name (Platform): CODE | expires\nHollow Knight (Steam): ABC-123 | 7d\nCeleste: DEF-456",
     )
 
+    def __init__(self, pre_message: str = "", codes: str = ""):
+        super().__init__()
+        prefill(self, pre_drop_message=pre_message, batch_data=codes)
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         if not can_share(interaction):
             await interaction.followup.send(MODS_ONLY_MSG, ephemeral=True)
             return
-        if interaction.guild and not can_post_here(interaction.channel, interaction.guild.me):
-            await interaction.followup.send(CANT_POST_MSG, ephemeral=True)
-            return
-
         raw_text = str(self.batch_data.value)
         pre_message = str(self.pre_drop_message.value or "").strip()
+
+        async def reject(text: str):
+            await interaction.followup.send(
+                text + RETRY_NOTE, ephemeral=True,
+                view=RetryView(lambda: BulkShareModal(pre_message, raw_text)))
+
+        if interaction.guild and not can_post_here(interaction.channel, interaction.guild.me):
+            await reject(CANT_POST_MSG)
+            return
         if contains_link(raw_text) or contains_link(pre_message):
-            await interaction.followup.send(LINK_MSG, ephemeral=True)
+            await reject(LINK_MSG)
             return
 
         valid, skipped = parse_bulk_text(raw_text)
         if not valid:
-            await interaction.followup.send(f"❌ I couldn't find any codes to post.\n\n{BULK_FORMAT_HELP}",
-                                            ephemeral=True)
+            note = ("\n\nSkipped:\n" + "\n".join(f"- {e}" for e in skipped[:5])) if skipped else ""
+            await reject(f"❌ I couldn't find any codes to post.{note}\n\n{BULK_FORMAT_HELP}")
             return
 
         await interaction.followup.send(f"Posting **{len(valid)}** codes...", ephemeral=True)
@@ -163,6 +197,12 @@ class BulkShareModal(discord.ui.Modal, title="Bulk Share Codes"):
             preview = "\n".join(f"- {e}" for e in skipped[:5])
             more = f"\n...and {len(skipped) - 5} more." if len(skipped) > 5 else ""
             text += f"\n\nSkipped **{len(skipped)}**:\n{preview}{more}"
+            left = "\n".join(e.rsplit("  [", 1)[0] for e in skipped)
+            text += "\n\n-# Press the button to reopen the form with only the skipped lines."
+            await interaction.followup.send(
+                text, ephemeral=True,
+                view=RetryView(lambda: BulkShareModal("", left), label="Fix the skipped lines"))
+            return
         await interaction.followup.send(text, ephemeral=True)
 
 

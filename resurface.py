@@ -231,11 +231,11 @@ def _option(r: dict) -> discord.SelectOption:
 def roundup_view(channel_id: int, rows: list[dict], feat: list[dict]) -> ui.LayoutView:
     n = len(rows)
     title = "## A code is waiting for a claimer" if n == 1 else "## Codes waiting for a claimer"
-    parts = [*cards.tile_section([f"-# STILL UP FOR GRABS  ·  {n} OPEN IN THIS CHANNEL", title],
-                                 cards.TILE_LIVE, "Claw reaching for a gift"),
-             ui.TextDisplay("\n".join(_line(r) for r in feat))]
-    if n > len(feat):
-        parts.append(ui.TextDisplay(f"-# and {n - len(feat)} more. A different set shows each time."))
+    more = f"and {n - len(feat)} more. A different set shows each time." if n > len(feat) else \
+        "The code only shows to whoever claims it."
+    parts = [*cards.header(f"STILL UP FOR GRABS  ·  {n} OPEN IN THIS CHANNEL",
+                           title + "\n" + "\n".join(_line(r) for r in feat), more,
+                           cards.TILE_LIVE, "Claw reaching for a gift")]
     parts.append(ui.Separator())
     pick = ui.Select(custom_id=PICK_ID, placeholder=f"Pick one of these {len(feat)} to claim",
                      options=[_option(r) for r in feat])
@@ -391,8 +391,8 @@ async def handle_browse(interaction: discord.Interaction, suffix: str) -> None:
 def _closed_ref_view(row: dict, label: str, line: str, tile: str, accent: int) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section([f"-# {label}", f"### {cards.item_label(row['item_name'], row.get('platform'))}\n{line}"],
-                            tile, label.title()),
+        *cards.header(label, f"### {cards.item_label(row['item_name'], row.get('platform'))}\n{line}", "",
+                      tile, label.title()),
         accent_color=accent,
     ))
     return view
@@ -432,11 +432,12 @@ async def _code_gone(row: dict, state: str, claimer: str | None) -> None:
 
 def last_call_view(row: dict, ts: int) -> ui.LayoutView:
     sharer = f"<@{row['sharer_id']}>" if row.get("sharer_id") else (row.get("sharer_name") or "someone")
-    plat = f"**{row['platform']}**  ·  " if row.get("platform") else ""
+    plat = f"\n**{row['platform']}**" if row.get("platform") else ""
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section([f"-# LAST CALL  ·  EXPIRES <t:{ts}:R>", f"## {row['item_name']}\n{plat}Shared by {sharer}"],
-                            cards.TILE_LIVE, "Claw reaching for a gift"),
+        *cards.header(f"LAST CALL  ·  EXPIRES <t:{ts}:R>", f"## {row['item_name']}{plat}",
+                      f"Shared by {sharer}. The code only shows to whoever claims it.",
+                      cards.TILE_LIVE, "Claw reaching for a gift"),
         ui.Separator(),
         ui.ActionRow(ui.Button(label="Claim code", style=discord.ButtonStyle.success, emoji="🎁",
                                custom_id=f"{CLAIMREF_PREFIX}{row['message_id']}")),
@@ -480,15 +481,17 @@ def raffle_reminder_view(r: dict, entries: int, winners: int) -> ui.LayoutView:
     jump = f"https://discord.com/channels/{r['guild_id']}/{r['channel_id']}/{r['message_id']}"
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section([f"-# RAFFLE CLOSING SOON  ·  {winners} WINNER{'S' if winners != 1 else ''}",
-                             f"## {r['title'] or 'Raffle'}\nDraw <t:{ends}:R>  ·  **{entries}** entered"],
-                            cards.TILE_LIVE, "Claw reaching for a gift"),
+        *cards.header(f"RAFFLE CLOSING SOON  ·  {winners} WINNER{'S' if winners != 1 else ''}",
+                      f"## {r['title'] or 'Raffle'}\nDraw <t:{ends}:R>  ·  **{entries}** entered",
+                      f"Hosted by <@{r['host_id']}>. Winners are picked at random and see their code privately.",
+                      cards.TILE_LIVE, "Claw reaching for a gift"),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Enter", style=discord.ButtonStyle.success, emoji="🎟️",
                       custom_id=f"cc:raffle:enter:{r['message_id']}"),
             ui.Button(label="Jump to raffle", style=discord.ButtonStyle.link, url=jump),
         ),
+        ui.TextDisplay(cards.INVITE_LINE),
         accent_color=cards.SKY,
     ))
     return view

@@ -110,3 +110,13 @@ Logs show one line per drop, claim, raffle entry, draw, join and leave, plus a d
 ## License
 
 MIT. Built by [Artchemy Labs](https://artchemylabs.com).
+
+## Card rule
+
+Every public card is built the same way, top to bottom. The full rule lives at the top of `cards.py`, and `cards.header()` builds the header for you.
+
+1. **Header beside the claw tile**, three texts at most: a small caps label, the title with its fact lines, then a small credit line that says who shared or hosted and what happens next.
+2. **The credit sits inside the header**, under the title. It never gets its own row below the tile.
+3. **Title size**: large on cards people can act on, one step smaller on closed cards.
+4. **Then** a separator, one row of buttons or one menu, and the small Add CodeClaimer link.
+5. **Wording and color**: "Shared by" for codes, "Hosted by" for raffles. Sky for live, navy for claimed or drawn, slate for expired, withdrawn or cancelled.

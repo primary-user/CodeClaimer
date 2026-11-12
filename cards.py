@@ -11,6 +11,23 @@ Two card styles live side by side:
 
 Every card ends with a small Add CodeClaimer link and an animated claw tile
 for its state (live, claimed, empty).
+
+CARD RULE (Nov 12 2026). Every public card is built the same way, top to bottom:
+  1. Header block beside the claw tile, at most three texts, in this order:
+       label    small caps line:  -# STATE  ·  DETAIL
+       title    ## on cards people can act on (live, raffle open, last call,
+                roundup). ### on closed cards (claimed, expired, withdrawn,
+                raffle ended or cancelled). Fact lines sit right under it.
+       credit   small line (-#) saying who shared or hosted, plus one short
+                sentence on what happens next.
+     The credit always sits inside the header, under the title. Never give it
+     its own row below the tile: on short cards that leaves a dead gap.
+  2. Extra content only when it is longer than the tile (a numbered guide).
+  3. Separator, then one row of buttons or one menu.
+  4. The small Add CodeClaimer link, on cards with an action or a result.
+Wording: "Shared by" for codes, "Hosted by" for raffles. One accent color per
+state: sky live, navy claimed or drawn, slate expired, withdrawn or cancelled.
+Build headers with header(). Do not hand-roll a Section.
 """
 import logging
 import os
@@ -141,6 +158,14 @@ def _compact_title(text: str, emoji: str) -> str:
     return "\n".join(lines)
 
 
+def header(label: str, title: str, credit: str, tile: str, alt: str):
+    """The header block from the CARD RULE: label, title with its facts, credit."""
+    texts = [f"-# {label}", title]
+    if credit:
+        texts.append(f"-# {credit}")
+    return tile_section(texts, tile, alt)
+
+
 def tile_section(texts: list[str], tile: str, alt: str):
     """Card text with the claw: thumbnail on the right, or a small emoji by the title."""
     if not TILES_ON:
@@ -179,8 +204,8 @@ def v2_live_card(item_name: str, platform: str, expires_at: str, sharer_mention:
     if note:
         body += f"\n{note}"
     view.add_item(ui.Container(
-        *tile_section([head, body], TILE_LIVE, "Claw reaching for a gift"),
-        ui.TextDisplay(f"-# Shared by {sharer_mention}. The code only shows to whoever claims it."),
+        *header(head[3:], body, f"Shared by {sharer_mention}. The code only shows to whoever claims it.",
+                TILE_LIVE, "Claw reaching for a gift"),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Claim code", style=discord.ButtonStyle.success, custom_id=CLAIM_CUSTOM_ID,
@@ -196,11 +221,10 @@ def v2_claimed_card(item_name: str, platform: str, claimer: str, sharer: str,
                     claimed_ts: int | None = None) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *tile_section([
-            "-# CLAIMED",
-            f"### {item_label(item_name, platform)}\n"
-            f"Claimed by **{claimer}** <t:{claimed_ts or _now_ts()}:R>. Thanks to **{sharer}** for sharing.",
-        ], TILE_CLAIMED, "Claw took the gift"),
+        *header("CLAIMED",
+                f"### {item_label(item_name, platform)}\nClaimed by **{claimer}** <t:{claimed_ts or _now_ts()}:R>",
+                f"Shared by **{sharer}**. The winner can press Show my code any time.",
+                TILE_CLAIMED, "Claw took the gift"),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Show my code", style=discord.ButtonStyle.secondary, custom_id=MYCODE_CUSTOM_ID),
@@ -220,8 +244,7 @@ def v2_final_card(item_name: str, platform: str, state: str, expires_at: str = "
         label, line = "WITHDRAWN", "The sharer took this code back."
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *tile_section([f"-# {label}", f"### {item_label(item_name, platform)}\n{line}"],
-                      TILE_EMPTY, "Empty claw"),
+        *header(label, f"### {item_label(item_name, platform)}\n{line}", "", TILE_EMPTY, "Empty claw"),
         ui.Separator(),
         ui.TextDisplay(INVITE_LINE),
         accent_color=SLATE,

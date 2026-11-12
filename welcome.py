@@ -90,9 +90,9 @@ def welcome_card() -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     code = lambda c: f"`{c}`"  # noqa: E731
     view.add_item(ui.Container(
-        *cards.tile_section(
-            ["-# THANKS FOR ADDING CODECLAIMER", "## Share codes without posting them in public"],
-            cards.TILE_LIVE, "Claw reaching for a gift"),
+        *cards.header("THANKS FOR ADDING CODECLAIMER", "## Share codes without posting them in public",
+                      "Built and run by one person. Three steps to your first drop:",
+                      cards.TILE_LIVE, "Claw reaching for a gift"),
         ui.TextDisplay(
             f"**1.** Run {code('/sharecode')} in any channel. The code stays hidden on a claim card.\n"
             "**2.** The first member to claim it sees the code on their screen, only them.\n"
@@ -106,7 +106,7 @@ def welcome_card() -> ui.LayoutView:
             ui.Button(label="Open settings", style=discord.ButtonStyle.secondary, custom_id=SETTINGS_ID),
             ui.Button(label="How it works", style=discord.ButtonStyle.secondary, custom_id=HELP_ID),
         ),
-        ui.TextDisplay(f"-# Questions? [Support server]({cards.SUPPORT_URL})  ·  Built and run by one person"),
+        ui.TextDisplay(f"-# Questions? [Support server]({cards.SUPPORT_URL})"),
         accent_color=cards.SKY,
     ))
     return view

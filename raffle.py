@@ -146,9 +146,10 @@ def open_card(r: dict, codes: list[dict], entries: int, challenge: bool) -> ui.L
         body += f"\n{_prize_lines(codes)}"
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section([head, body], cards.TILE_LIVE, "Claw reaching for a gift"),
-        ui.TextDisplay(f"Draw <t:{ends}:R>  ·  **{entries}** entered"),
-        ui.TextDisplay(f"-# Hosted by <@{r['host_id']}>. Winners are picked at random and see their code privately."),
+        *cards.header(
+            head[3:], f"{body}\nDraw <t:{ends}:R>  ·  **{entries}** entered",
+            f"Hosted by <@{r['host_id']}>. Winners are picked at random and see their code privately.",
+            cards.TILE_LIVE, "Claw reaching for a gift"),
         ui.Separator(),
         ui.ActionRow(
             ui.Button(label="Enter", style=discord.ButtonStyle.success, custom_id=ENTER_CUSTOM_ID, emoji="🎟️"),
@@ -165,10 +166,10 @@ def ended_card(r: dict, codes: list[dict], entries: int) -> ui.LayoutView:
     leftovers = [c for c in codes if not c.get("winner_id")]
     if winners:
         body = _prize_lines(codes, with_winners=True)
-        foot = "-# Winners: press Show my prize to see your code. A copy went to your DMs."
+        foot = f"Hosted by <@{r['host_id']}>. Winners: press Show my prize. A copy went to your DMs."
     else:
         body = "Nobody entered, so the codes went back to the host."
-        foot = f"-# Hosted by <@{r['host_id']}>."
+        foot = f"Hosted by <@{r['host_id']}>."
     row = []
     if winners:
         row.append(ui.Button(label="Show my prize", style=discord.ButtonStyle.primary,
@@ -179,9 +180,8 @@ def ended_card(r: dict, codes: list[dict], entries: int) -> ui.LayoutView:
     tile = cards.TILE_CLAIMED if winners else cards.TILE_EMPTY
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section([f"-# RAFFLE ENDED  ·  {entries} ENTERED", f"## {title}\n{body}"], tile,
-                            "Claw took the gift" if winners else "Empty claw"),
-        ui.TextDisplay(foot),
+        *cards.header(f"RAFFLE ENDED  ·  {entries} ENTERED", f"### {title}\n{body}", foot, tile,
+                      "Claw took the gift" if winners else "Empty claw"),
         ui.Separator(),
         *([ui.ActionRow(*row)] if row else []),
         ui.TextDisplay(cards.INVITE_LINE),
@@ -194,9 +194,9 @@ def cancelled_card(r: dict, codes: list[dict]) -> ui.LayoutView:
     title = r["title"] or (cards.item_label(codes[0]["item_name"], codes[0]["platform"]) if codes else "Raffle")
     view = ui.LayoutView(timeout=None)
     view.add_item(ui.Container(
-        *cards.tile_section(["-# RAFFLE CANCELLED",
-                             f"### {title}\nThe host called this one off. The codes went back to them."],
-                            cards.TILE_EMPTY, "Empty claw"),
+        *cards.header("RAFFLE CANCELLED", f"### {title}\nThe host called this one off.",
+                      f"Hosted by <@{r['host_id']}>. The codes went back to them.",
+                      cards.TILE_EMPTY, "Empty claw"),
         ui.Separator(),
         ui.TextDisplay(cards.INVITE_LINE),
         accent_color=cards.SLATE,

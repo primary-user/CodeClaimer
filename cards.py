@@ -94,12 +94,51 @@ def invite_button(label: str = "Add to your server") -> ui.Button:
     return ui.Button(label=label, style=discord.ButtonStyle.link, url=INVITE_URL)
 
 
-def tile_section(texts: list[str], tile: str, alt: str):
-    """Text on the left, claw tile on the right. Plain text when tiles are off."""
-    displays = [ui.TextDisplay(t) for t in texts[:3]]
+# Claw art rides inline as an app emoji beside the title. Discord gives no size
+# control over a Section thumbnail, and it made cards tall on mobile.
+_EMOJI_FILES = {
+    TILE_LIVE:    ("claw_live_v1",    "claw-live-v1.gif"),
+    TILE_CLAIMED: ("claw_claimed_v1", "claw-claimed-v1.gif"),
+    TILE_EMPTY:   ("claw_empty_v1",   "claw-empty-v1.png"),
+}
+TILE_EMOJI: dict[str, str] = {}
+
+
+async def ensure_emojis(client) -> None:
+    """Upload the claw tiles as app emojis once, then remember them. Fail safe:
+    without them, cards simply show no claw."""
     if not TILES_ON:
-        return displays
-    return [ui.Section(*displays, accessory=ui.Thumbnail(tile, description=alt))]
+        return
+    try:
+        have = {e.name: e for e in await client.fetch_application_emojis()}
+        folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        for tile, (name, fname) in _EMOJI_FILES.items():
+            e = have.get(name)
+            if e is None:
+                with open(os.path.join(folder, fname), "rb") as f:
+                    e = await client.create_application_emoji(name=name, image=f.read())
+                log.info("Uploaded app emoji %s", name)
+            TILE_EMOJI[tile] = str(e)
+        log.info("Claw emojis ready: %d", len(TILE_EMOJI))
+    except Exception:
+        log.exception("Claw emojis unavailable, cards will show without the claw")
+
+
+def _compact_title(text: str, emoji: str) -> str:
+    """Title one size down (## to ###) with the claw emoji in front of it."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.startswith("## ") or ln.startswith("### "):
+            title = ln.split(" ", 1)[1]
+            lines[i] = f"### {emoji} {title}" if emoji else f"### {title}"
+            break
+    return "\n".join(lines)
+
+
+def tile_section(texts: list[str], tile: str, alt: str):
+    """Card text with a small claw emoji beside the title."""
+    emoji = TILE_EMOJI.get(tile, "") if TILES_ON else ""
+    return [ui.TextDisplay(_compact_title(t, emoji)) for t in texts[:3]]
 
 
 # ---------------------------------------------------------------------------

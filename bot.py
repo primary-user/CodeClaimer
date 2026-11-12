@@ -62,6 +62,7 @@ class CodeBot(commands.Bot):
         refresh.init_table()
         resurface.init_tables()
         welcome.init_table()
+        await cards.ensure_emojis(self)
         claims.bind(self)
         self.http_session = aiohttp.ClientSession()
         for cmd in ALL_COMMANDS:

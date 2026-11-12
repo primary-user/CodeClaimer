@@ -229,12 +229,23 @@ def parse_duration(raw: str) -> int | None:
     return seconds if MIN_SECONDS <= seconds <= MAX_SECONDS else None
 
 
+def name_bare_codes(raw: str, title: str) -> str:
+    """A line with only a code still counts as a prize. It takes the raffle
+    title as its name, or "Mystery prize" when there is no title."""
+    from parsing import split_bulk_entries
+    name = (title or "Mystery prize").replace(":", " ").replace("|", " ").strip() or "Mystery prize"
+    out = []
+    for line in split_bulk_entries(raw):
+        out.append(line if ":" in line.split("|", 1)[0] else f"{name}: {line}")
+    return "\n".join(out)
+
+
 class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
     raffle_title = discord.ui.TextInput(label="Title (optional)", style=discord.TextStyle.short, required=False,
                                         max_length=100, placeholder="e.g. Friday game night giveaway")
     codes = discord.ui.TextInput(
-        label="Prizes, one code per line (one winner each)", style=discord.TextStyle.paragraph,
-        max_length=4000, placeholder="Hollow Knight (Steam): ABC-123\nCeleste: DEF-456 | 12/31/2026",
+        label="Prizes, one per line (one winner each)", style=discord.TextStyle.paragraph,
+        max_length=4000, placeholder="Hollow Knight (Steam): ABC-123\nCeleste: DEF-456 | 12/31/2026\nor just the code",
     )
     duration = discord.ui.TextInput(label="Entries stay open for", style=discord.TextStyle.short,
                                     default="1h", max_length=10, placeholder="30m, 1h, 2d (1m to 14d)")
@@ -263,7 +274,7 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
             return
         ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
-        valid, skipped = parse_bulk_text(raw)
+        valid, skipped = parse_bulk_text(name_bare_codes(raw, title))
         kept = []
         for item in valid:
             exp = parse_expiration_datetime(item[3])
@@ -277,6 +288,8 @@ class RaffleModal(discord.ui.Modal, title="Start a Raffle"):
         if not kept:
             from commands import BULK_FORMAT_HELP
             note = ("\n\nSkipped:\n" + "\n".join(f"- {s}" for s in skipped[:5])) if skipped else ""
+            log.info("Raffle rejected guild=%s host=%d lines=%d skipped=%d", interaction.guild_id,
+                     interaction.user.id, len(raw.splitlines()), len(skipped))
             await interaction.followup.send(f"❌ No prizes to raffle.{note}\n\n{BULK_FORMAT_HELP}", ephemeral=True)
             return
 

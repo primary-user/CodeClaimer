@@ -104,10 +104,15 @@ _EMOJI_FILES = {
 TILE_EMOJI: dict[str, str] = {}
 
 
+# "tile" is the claw thumbnail on the right (picked Nov 12 after trying the
+# small inline icon). CLAW_STYLE=emoji switches to the icon beside the title.
+CLAW_STYLE = (os.getenv("CLAW_STYLE") or "tile").strip().lower()
+
+
 async def ensure_emojis(client) -> None:
     """Upload the claw tiles as app emojis once, then remember them. Fail safe:
     without them, cards simply show no claw."""
-    if not TILES_ON:
+    if not TILES_ON or CLAW_STYLE != "emoji":
         return
     try:
         have = {e.name: e for e in await client.fetch_application_emojis()}
@@ -137,9 +142,12 @@ def _compact_title(text: str, emoji: str) -> str:
 
 
 def tile_section(texts: list[str], tile: str, alt: str):
-    """Card text with a small claw emoji beside the title."""
-    emoji = TILE_EMOJI.get(tile, "") if TILES_ON else ""
-    return [ui.TextDisplay(_compact_title(t, emoji)) for t in texts[:3]]
+    """Card text with the claw: thumbnail on the right, or a small emoji by the title."""
+    if not TILES_ON:
+        return [ui.TextDisplay(t) for t in texts[:3]]
+    if CLAW_STYLE == "emoji":
+        return [ui.TextDisplay(_compact_title(t, TILE_EMOJI.get(tile, ""))) for t in texts[:3]]
+    return [ui.Section(*[ui.TextDisplay(t) for t in texts[:3]], accessory=ui.Thumbnail(tile, description=alt))]
 
 
 # ---------------------------------------------------------------------------
